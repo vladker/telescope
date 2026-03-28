@@ -65,7 +65,7 @@ func (e *Encoder) FrameInfo() format.FrameInfo {
 	return format.CalcFrameInfo(e.width, e.height, e.pixelSize, e.mode)
 }
 
-func (e *Encoder) EncodeChunk(data []byte, frameNum, totalFrames uint32) (*image.Gray, error) {
+func (e *Encoder) EncodeChunk(data []byte, frameNum, totalFrames uint32, filename string) (*image.Gray, error) {
 	fi := e.FrameInfo()
 	e.log("EncodeChunk: width=%d, height=%d, pixelSize=%d, dataBigPixels=%d, dataLen=%d",
 		e.width, e.height, e.pixelSize, fi.DataBigPixels, len(data))
@@ -82,7 +82,7 @@ func (e *Encoder) EncodeChunk(data []byte, frameNum, totalFrames uint32) (*image
 
 	img := image.NewGray(image.Rect(0, 0, e.width, e.height))
 	e.drawBorder(img)
-	e.drawMetaHeader(img, data[:dataLen], frameNum, totalFrames)
+	e.drawMetaHeader(img, data[:dataLen], frameNum, totalFrames, filename)
 	e.drawData(img, data[:dataLen], frameNum, totalFrames)
 
 	return img, nil
@@ -112,12 +112,15 @@ func (e *Encoder) drawBorder(img *image.Gray) {
 	}
 }
 
-func (e *Encoder) drawMetaHeader(img *image.Gray, data []byte, frameNum, totalFrames uint32) {
+func (e *Encoder) drawMetaHeader(img *image.Gray, data []byte, frameNum, totalFrames uint32, filename string) {
 	fi := e.FrameInfo()
 	px := int(e.pixelSize)
 
 	header := format.NewHeader(uint32(len(data)), frameNum, totalFrames, uint32(len(data)))
 	header.SetCRC(data)
+	if frameNum == 0 {
+		header.SetFilename(filename)
+	}
 	headerData := header.Serialize()
 
 	if e.mode == format.ModeDenseValue {
@@ -298,25 +301,25 @@ func EncodeFile(inputPath, outputDir string, width, height int, pixelSize format
 		chunk := buf[:n]
 		logger(fmt.Sprintf("Encoding frame %d/%d with %d bytes", frameNum+1, totalFrames, n))
 
-		img, err := encoder.EncodeChunk(chunk, frameNum, totalFrames)
+		img, err := encoder.EncodeChunk(chunk, frameNum, totalFrames, filepath.Base(inputPath))
 		if err != nil {
 			return int(frameNum), fmt.Errorf("failed to encode chunk: %w", err)
 		}
 
-		filename := fmt.Sprintf("frame_%04d.%s", frameNum, format_)
-		filepath := filepath.Join(outputDir, filename)
+		frameFilename := fmt.Sprintf("frame_%04d.%s", frameNum, format_)
+		framePath := filepath.Join(outputDir, frameFilename)
 
 		if format_ == "png" {
-			if err := encoder.SaveImage(img, filepath); err != nil {
+			if err := encoder.SaveImage(img, framePath); err != nil {
 				return int(frameNum) + 1, fmt.Errorf("failed to save PNG: %w", err)
 			}
 		} else {
-			if err := encoder.SaveImageJPEG(img, filepath, 95); err != nil {
+			if err := encoder.SaveImageJPEG(img, framePath, 95); err != nil {
 				return int(frameNum) + 1, fmt.Errorf("failed to save JPEG: %w", err)
 			}
 		}
 
-		logger(fmt.Sprintf("Saved frame %d to %s", frameNum, filename))
+		logger(fmt.Sprintf("Saved frame %d to %s", frameNum, frameFilename))
 		frameNum++
 	}
 
@@ -329,13 +332,14 @@ func EncodeFile(inputPath, outputDir string, width, height int, pixelSize format
 
 	manifest := fmt.Sprintf(`{
   "version": %d,
+  "filename": "%s",
   "total_size": %d,
   "total_frames": %d,
   "width": %d,
   "height": %d,
   "pixel_size": %d,
   "mode": "%s"
-}`, format.Version, totalSize, totalFrames, width, height, pixelSize, modeStr)
+}`, format.Version, filepath.Base(inputPath), totalSize, totalFrames, width, height, pixelSize, modeStr)
 
 	manifestPath := filepath.Join(outputDir, "manifest.json")
 	if err := os.WriteFile(manifestPath, []byte(manifest), 0644); err != nil {

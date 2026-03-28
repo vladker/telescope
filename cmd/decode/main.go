@@ -95,8 +95,8 @@ func interactiveMode() {
 
 	output := readLine("Output file path: ")
 	if output == "" {
-		fmt.Println("Error: output file required")
-		os.Exit(1)
+		output = filepath.Base(input) + "_restored"
+		fmt.Printf("Using: %s\n", output)
 	}
 
 	var fps float64 = 1.0
@@ -170,6 +170,17 @@ func interactiveMode() {
 		os.Exit(1)
 	}
 
+	if output == "" {
+		filename := codec.ExtractFilenameFromFrames(framePaths)
+		if filename != "" {
+			output = filename
+			fmt.Printf("Original filename: %s\n", output)
+		} else {
+			output = filepath.Base(input) + "_restored"
+			fmt.Printf("Using: %s\n", output)
+		}
+	}
+
 	fmt.Printf("Found %d frames\n", len(framePaths))
 	fmt.Println("Decoding frames...")
 
@@ -218,7 +229,7 @@ func main() {
 	flag.BoolVar(interactive, "interactive", false, "Interactive mode")
 
 	input := flag.String("i", "", "Input directory with frames or video file (required)")
-	output := flag.String("o", "", "Output file path (required)")
+	output := flag.String("o", "", "Output file path (optional, uses original filename)")
 	isVideo := flag.Bool("video", false, "Input is a video file (requires ffmpeg)")
 	fps := flag.Float64("fps", 1.0, "FPS for video frame extraction")
 	unique := flag.Bool("unique", true, "Extract only unique frames")
@@ -231,8 +242,8 @@ func main() {
 		return
 	}
 
-	if *input == "" || *output == "" {
-		fmt.Println("Error: -i and -o flags are required (or use -interactive)")
+	if *input == "" {
+		fmt.Println("Error: -i flag is required (or use -interactive)")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -268,6 +279,15 @@ func main() {
 		fmt.Println("\nPress Enter to exit...")
 		reader.ReadString('\n')
 		os.Exit(1)
+	}
+
+	if *output == "" {
+		filename := codec.ExtractFilenameFromFrames(framePaths)
+		if filename != "" {
+			*output = filename
+		} else {
+			*output = filepath.Base(*input) + "_restored"
+		}
 	}
 
 	fmt.Printf("Found %d frames\n", len(framePaths))

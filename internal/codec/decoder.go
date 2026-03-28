@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"image"
@@ -187,14 +188,19 @@ func (d *Decoder) DecodeFrame(img image.Image) ([]byte, *format.Header, error) {
 	return d.DecodeFrameWithSkip(img, false)
 }
 
-func (d *Decoder) DecodeFrameWithSkip(img image.Image, skipCRC bool) ([]byte, *format.Header, error) {
+func (d *Decoder) ReadHeader(img image.Image) (*format.Header, error) {
+	headerData, _, err := d.readHeaderFromImage(img)
+	if err != nil {
+		return nil, err
+	}
+	return format.ParseHeader(headerData)
+}
+
+func (d *Decoder) readHeaderFromImage(img image.Image) ([]byte, format.FrameInfo, error) {
 	fi, err := d.DetectFrameInfo(img)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to detect frame info: %w", err)
+		return nil, fi, fmt.Errorf("failed to detect frame info: %w", err)
 	}
-
-	d.log("Decoding frame: %dx%d, pixelSize=%d, mode=%d, bigPixels=%dx%d, dataBigPixels=%d",
-		fi.Width, fi.Height, fi.PixelSize, fi.Mode, fi.BigPixelsW, fi.BigPixelsH, fi.DataBigPixels)
 
 	borderPx := fi.BorderW
 	ps := int(fi.PixelSize)
@@ -222,11 +228,23 @@ func (d *Decoder) DecodeFrameWithSkip(img image.Image, skipCRC bool) ([]byte, *f
 		}
 	}
 
-	d.log("Read %d bytes of header data", len(headerData))
-
 	if len(headerData) < format.HeaderSize {
-		return nil, nil, fmt.Errorf("%w: expected %d bytes, got %d", format.ErrInvalidHeader, format.HeaderSize, len(headerData))
+		return nil, fi, fmt.Errorf("%w: expected %d bytes, got %d", format.ErrInvalidHeader, format.HeaderSize, len(headerData))
 	}
+
+	return headerData, fi, nil
+}
+
+func (d *Decoder) DecodeFrameWithSkip(img image.Image, skipCRC bool) ([]byte, *format.Header, error) {
+	headerData, fi, err := d.readHeaderFromImage(img)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	d.log("Decoding frame: %dx%d, pixelSize=%d, mode=%d, bigPixels=%dx%d, dataBigPixels=%d",
+		fi.Width, fi.Height, fi.PixelSize, fi.Mode, fi.BigPixelsW, fi.BigPixelsH, fi.DataBigPixels)
+
+	d.log("Read %d bytes of header data", len(headerData))
 
 	header, err := format.ParseHeader(headerData)
 	if err != nil {
@@ -236,8 +254,16 @@ func (d *Decoder) DecodeFrameWithSkip(img image.Image, skipCRC bool) ([]byte, *f
 	d.log("Header parsed: frameNum=%d, totalFrames=%d, dataSize=%d, crc=0x%08x",
 		header.FrameNum, header.TotalFrames, header.DataSize, header.CRC)
 
+	borderPx := fi.BorderW
+	ps := int(fi.PixelSize)
+	colsPerRow := fi.BigPixelsW - 2*format.BorderBigPixels
+
 	var frameData []byte
 	if fi.Mode == format.ModeDenseValue {
+		headerRows := format.HeaderSize * 2 / colsPerRow
+		if (format.HeaderSize*2)%colsPerRow != 0 {
+			headerRows++
+		}
 		dataStartRow := format.BorderBigPixels + headerRows
 		frameDataRows := fi.BigPixelsH - format.BorderBigPixels - headerRows
 		frameData = d.readDenseData(img, dataStartRow, frameDataRows, colsPerRow, colsPerRow, fi.BigPixelsH, ps, borderPx, int(header.DataSize))
@@ -443,4 +469,54 @@ func ReconstructFile(frames map[uint32][]byte, outputPath string) error {
 	}
 
 	return nil
+}
+
+type Manifest struct {
+	Version     int    `json:"version"`
+	Filename    string `json:"filename"`
+	TotalSize   uint32 `json:"total_size"`
+	TotalFrames uint32 `json:"total_frames"`
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+	PixelSize   int    `json:"pixel_size"`
+	Mode        string `json:"mode"`
+}
+
+func ReadManifest(dir string) (*Manifest, error) {
+	path := filepath.Join(dir, "manifest.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var m Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+func ExtractFilenameFromFrames(framePaths []string) string {
+	if len(framePaths) == 0 {
+		return ""
+	}
+	decoder := NewDecoder()
+	for _, path := range framePaths {
+		img, err := decoder.LoadImage(path)
+		if err != nil {
+			continue
+		}
+		headerData, _, err := decoder.readHeaderFromImage(img)
+		if err != nil || len(headerData) < format.HeaderSize {
+			continue
+		}
+		header, err := format.ParseHeader(headerData)
+		if err != nil {
+			continue
+		}
+		if header.FrameNum == 0 && header.GetFilename() != "" {
+			return header.GetFilename()
+		}
+	}
+	return ""
 }

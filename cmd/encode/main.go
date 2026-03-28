@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -68,9 +67,9 @@ func interactiveMode() {
 		os.Exit(1)
 	}
 
-	output := readLine("Output directory: ")
+	output := readLine("Output directory [frames]: ")
 	if output == "" {
-		output = filepath.Base(input) + "_frames"
+		output = "frames"
 		fmt.Printf("Using: %s\n", output)
 	}
 
@@ -151,7 +150,7 @@ func main() {
 	flag.BoolVar(interactive, "interactive", false, "Interactive mode")
 
 	input := flag.String("i", "", "Input file path (required)")
-	output := flag.String("o", "", "Output directory for frames (required)")
+	output := flag.String("o", "frames", "Output directory for frames")
 	width := flag.Int("W", 1920, "Image width in pixels")
 	height := flag.Int("H", 1080, "Image height in pixels")
 	pixelSize := flag.Int("p", 2, "Big pixel size (1, 2, or 3)")
@@ -165,8 +164,8 @@ func main() {
 		return
 	}
 
-	if *input == "" || *output == "" {
-		fmt.Println("Error: -i and -o flags are required (or use -interactive)")
+	if *input == "" {
+		fmt.Println("Error: -i flag is required (or use -interactive)")
 		flag.Usage()
 		os.Exit(1)
 	}

@@ -155,7 +155,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 				WithMode(tt.mode),
 			)
 
-			img, err := encoder.EncodeChunk(tt.data, 0, 1)
+			img, err := encoder.EncodeChunk(tt.data, 0, 1, "test.bin")
 			if err != nil {
 				t.Fatalf("EncodeChunk failed: %v", err)
 			}
@@ -213,7 +213,7 @@ func TestEncodeDecodeMultiFrame(t *testing.T) {
 		}
 		chunk := data[start:end]
 
-		img, err := encoder.EncodeChunk(chunk, i, totalFrames)
+		img, err := encoder.EncodeChunk(chunk, i, totalFrames, "test.bin")
 		if err != nil {
 			t.Fatalf("EncodeChunk frame %d failed: %v", i, err)
 		}
@@ -335,7 +335,7 @@ func TestDensePalette(t *testing.T) {
 func TestImageTooSmall(t *testing.T) {
 	encoder := NewEncoder(20, 20, WithPixelSize(format.Pixel2x2), WithMode(format.ModeRobustValue))
 
-	_, err := encoder.EncodeChunk([]byte("test"), 0, 1)
+	_, err := encoder.EncodeChunk([]byte("test"), 0, 1, "test.bin")
 	if err == nil {
 		t.Error("Expected error for image too small")
 	}
@@ -384,11 +384,32 @@ func TestNoBorder(t *testing.T) {
 	}
 }
 
+func TestFilenameInHeader(t *testing.T) {
+	encoder := NewEncoder(1920, 1080, WithPixelSize(format.Pixel2x2), WithMode(format.ModeRobustValue))
+
+	expectedFilename := "my_test_file.bin"
+	img, err := encoder.EncodeChunk([]byte("test data"), 0, 1, expectedFilename)
+	if err != nil {
+		t.Fatalf("EncodeChunk failed: %v", err)
+	}
+
+	decoder := NewDecoder()
+	header, err := decoder.ReadHeader(img)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+
+	actualFilename := header.GetFilename()
+	if actualFilename != expectedFilename {
+		t.Errorf("Filename = %q, want %q", actualFilename, expectedFilename)
+	}
+}
+
 func TestDecodeCRCError(t *testing.T) {
 	t.Skip("Skipping CRC error test temporarily")
 	encoder := NewEncoder(1920, 1080, WithPixelSize(format.Pixel2x2), WithMode(format.ModeRobustValue))
 
-	img, err := encoder.EncodeChunk([]byte("test data for CRC"), 0, 1)
+	img, err := encoder.EncodeChunk([]byte("test data for CRC"), 0, 1, "test.bin")
 	if err != nil {
 		t.Fatalf("EncodeChunk failed: %v", err)
 	}
@@ -405,7 +426,7 @@ func TestDecodeCRCError(t *testing.T) {
 func TestSkipCRC(t *testing.T) {
 	encoder := NewEncoder(1920, 1080, WithPixelSize(format.Pixel2x2), WithMode(format.ModeRobustValue))
 
-	img, err := encoder.EncodeChunk([]byte("test data"), 0, 1)
+	img, err := encoder.EncodeChunk([]byte("test data"), 0, 1, "test.bin")
 	if err != nil {
 		t.Fatalf("EncodeChunk failed: %v", err)
 	}
@@ -458,7 +479,7 @@ func TestEncodeSmallImage(t *testing.T) {
 	encoder := NewEncoder(200, 200, WithPixelSize(format.Pixel2x2), WithMode(format.ModeRobustValue))
 
 	data := []byte("Small 200x200 test")
-	img, err := encoder.EncodeChunk(data, 0, 1)
+	img, err := encoder.EncodeChunk(data, 0, 1, "test.bin")
 	if err != nil {
 		t.Fatalf("EncodeChunk failed: %v", err)
 	}
@@ -485,7 +506,7 @@ func TestEncodeTinyImage(t *testing.T) {
 	encoder := NewEncoder(100, 100, WithPixelSize(format.Pixel1x1), WithMode(format.ModeRobustValue))
 
 	data := []byte("Tiny 100x100 test")
-	img, err := encoder.EncodeChunk(data, 0, 1)
+	img, err := encoder.EncodeChunk(data, 0, 1, "test.bin")
 	if err != nil {
 		t.Fatalf("EncodeChunk failed: %v", err)
 	}

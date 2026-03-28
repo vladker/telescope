@@ -3,6 +3,7 @@ package format
 import (
 	"encoding/binary"
 	"hash/crc32"
+	"strings"
 )
 
 const (
@@ -53,7 +54,25 @@ func NewHeader(fileSize, frameNum, totalFrames, dataSize uint32) *Header {
 		DataSize:    dataSize,
 	}
 	copy(h.Signature[:], Signature)
+	for i := range h.Reserved {
+		h.Reserved[i] = 0
+	}
 	return h
+}
+
+func (h *Header) SetFilename(filename string) {
+	if len(filename) > 31 {
+		filename = filename[:31]
+	}
+	copy(h.Reserved[:], filename)
+}
+
+func (h *Header) GetFilename() string {
+	filename := string(h.Reserved[:])
+	if idx := strings.Index(filename, "\x00"); idx >= 0 {
+		filename = filename[:idx]
+	}
+	return strings.TrimSpace(filename)
 }
 
 func (h *Header) Serialize() []byte {
@@ -65,6 +84,7 @@ func (h *Header) Serialize() []byte {
 	binary.LittleEndian.PutUint32(data[20:24], h.TotalFrames)
 	binary.LittleEndian.PutUint32(data[24:28], h.DataSize)
 	binary.LittleEndian.PutUint32(data[28:32], h.CRC)
+	copy(data[32:64], h.Reserved[:])
 	return data
 }
 
