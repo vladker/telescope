@@ -235,7 +235,8 @@ func main() {
 
 	input := flag.String("i", "", "Input directory with frames or video file (required)")
 	output := flag.String("o", "decoded", "Output file path or directory")
-	isVideo := flag.Bool("video", false, "Input is a video file (requires ffmpeg)")
+	isVideo := flag.Bool("video", false, "Input is a video file (auto-detected by extension)")
+	flag.BoolVar(isVideo, "v", false, "Input is a video file")
 	fps := flag.Float64("fps", 1.0, "FPS for video frame extraction")
 	unique := flag.Bool("unique", true, "Extract only unique frames")
 	force := flag.Bool("force", false, "Skip CRC validation")
@@ -253,18 +254,46 @@ func main() {
 		os.Exit(1)
 	}
 
+	if !*isVideo {
+		ext := strings.ToLower(filepath.Ext(*input))
+		videoExts := map[string]bool{".mp4": true, ".avi": true, ".mkv": true, ".mov": true, ".webm": true, ".wmv": true}
+		if videoExts[ext] {
+			*isVideo = true
+		}
+	}
+
+	if !*isVideo {
+		if info, err := os.Stat(*input); err == nil && info.IsDir() {
+			entries, _ := os.ReadDir(*input)
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				ext := strings.ToLower(filepath.Ext(entry.Name()))
+				videoExts := map[string]bool{".mp4": true, ".avi": true, ".mkv": true, ".mov": true, ".webm": true, ".wmv": true}
+				if videoExts[ext] {
+					*input = filepath.Join(*input, entry.Name())
+					*isVideo = true
+					break
+				}
+			}
+		}
+	}
+
 	var tempDir string
 	var err error
 
 	if *isVideo {
-		fmt.Println("Video mode detected, extracting frames...")
+		fmt.Println("Video file detected, extracting frames...")
 		tempDir = filepath.Join(os.TempDir(), "telescope-frames")
 		os.MkdirAll(tempDir, 0755)
 		defer os.RemoveAll(tempDir)
 
 		fmt.Printf("Extracting frames from %s at %.1f FPS...\n", *input, *fps)
 		if err := detector.ExtractFramesFromVideo(*input, tempDir, *fps); err != nil {
-			fmt.Printf("Error extracting frames: %v\n", err)
+			fmt.Printf("Error: ffmpeg not found or failed\n")
+			fmt.Printf("Install ffmpeg: winget install ffmpeg\n")
+			fmt.Printf("Or extract frames manually: ffmpeg -i \"%s\" -vf fps=1 frame_%%04d.png\n", *input)
 			os.Exit(1)
 		}
 		*input = tempDir

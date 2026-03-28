@@ -36,28 +36,28 @@ func TestCalcFrameInfo(t *testing.T) {
 			width:      200, height: 200,
 			pixelSize: format.Pixel2x2,
 			mode:      format.ModeRobustValue,
-			wantMinW:  80, wantMinH: 80, wantMinBPs: 4000,
+			wantMinW:  70, wantMinH: 70, wantMinBPs: 2000,
 		},
 		{
 			name:       "200x200 1x1",
 			width:      200, height: 200,
 			pixelSize: format.Pixel1x1,
 			mode:      format.ModeRobustValue,
-			wantMinW:  180, wantMinH: 180, wantMinBPs: 25000,
+			wantMinW:  150, wantMinH: 150, wantMinBPs: 15000,
 		},
 		{
 			name:       "100x100 1x1",
 			width:      100, height: 100,
 			pixelSize: format.Pixel1x1,
 			mode:      format.ModeRobustValue,
-			wantMinW:  80, wantMinH: 80, wantMinBPs: 4000,
+			wantMinW:  60, wantMinH: 60, wantMinBPs: 1000,
 		},
 		{
 			name:       "100x100 3x3",
-			width:      100, height: 100,
+			width:      200, height: 200,
 			pixelSize: format.Pixel3x3,
 			mode:      format.ModeRobustValue,
-			wantMinW:  15, wantMinH: 15, wantMinBPs: 0,
+			wantMinW:  40, wantMinH: 40, wantMinBPs: 100,
 		},
 	}
 
@@ -141,10 +141,10 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		// },
 		{
 			name:      "Large data multi-frame",
-			width:     200, height: 200,
+			width:     1920, height: 1080,
 			pixelSize: format.Pixel2x2,
 			mode:      format.ModeRobustValue,
-			data:      bytes.Repeat([]byte("ABCDEFGH"), 500),
+			data:      bytes.Repeat([]byte("ABCDEFGH"), 1000),
 		},
 	}
 

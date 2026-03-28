@@ -82,7 +82,7 @@ func (e *Encoder) EncodeChunk(data []byte, frameNum, totalFrames uint32, filenam
 
 	img := image.NewGray(image.Rect(0, 0, e.width, e.height))
 	e.drawBorder(img)
-	e.drawMetaHeader(img, data[:dataLen], frameNum, totalFrames, filename)
+	e.drawMetaHeader(img, data[:dataLen], frameNum, totalFrames, filename, uint32(len(data)))
 	e.drawData(img, data[:dataLen], frameNum, totalFrames)
 
 	return img, nil
@@ -112,11 +112,11 @@ func (e *Encoder) drawBorder(img *image.Gray) {
 	}
 }
 
-func (e *Encoder) drawMetaHeader(img *image.Gray, data []byte, frameNum, totalFrames uint32, filename string) {
+func (e *Encoder) drawMetaHeader(img *image.Gray, data []byte, frameNum, totalFrames uint32, filename string, fileSize uint32) {
 	fi := e.FrameInfo()
 	px := int(e.pixelSize)
 
-	header := format.NewHeader(uint32(len(data)), frameNum, totalFrames, uint32(len(data)))
+	header := format.NewHeader(fileSize, frameNum, totalFrames, uint32(len(data)))
 	header.SetCRC(data)
 	if frameNum == 0 {
 		header.SetFilename(filename)

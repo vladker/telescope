@@ -10,7 +10,7 @@ const (
 	Signature       = "TSCOPE01"
 	HeaderSize      = 64
 	Version         = uint32(1)
-	BorderBigPixels = 4
+	BorderBigPixels = 12
 	CalibrationBits = 0xFF
 )
 
