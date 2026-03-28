@@ -93,10 +93,9 @@ func interactiveMode() {
 		}
 	}
 
-	output := readLine("Output file path: ")
+	output := readLine("Output directory [decoded]: ")
 	if output == "" {
-		output = filepath.Base(input) + "_restored"
-		fmt.Printf("Using: %s\n", output)
+		output = "decoded"
 	}
 
 	var fps float64 = 1.0
@@ -170,15 +169,21 @@ func interactiveMode() {
 		os.Exit(1)
 	}
 
-	if output == "" {
-		filename := codec.ExtractFilenameFromFrames(framePaths)
-		if filename != "" {
-			output = filename
-			fmt.Printf("Original filename: %s\n", output)
-		} else {
-			output = filepath.Base(input) + "_restored"
-			fmt.Printf("Using: %s\n", output)
+	filename := codec.ExtractFilenameFromFrames(framePaths)
+	if filename == "" {
+		filename = filepath.Base(input) + "_restored"
+	}
+
+	if info, err := os.Stat(output); err == nil && info.IsDir() {
+		output = filepath.Join(output, filename)
+		fmt.Printf("Output: %s\n", output)
+	} else if output == "decoded" {
+		output = filepath.Join("decoded", filename)
+		if err := os.MkdirAll("decoded", 0755); err != nil {
+			fmt.Printf("Error creating decoded directory: %v\n", err)
+			os.Exit(1)
 		}
+		fmt.Printf("Output: %s\n", output)
 	}
 
 	fmt.Printf("Found %d frames\n", len(framePaths))
@@ -229,7 +234,7 @@ func main() {
 	flag.BoolVar(interactive, "interactive", false, "Interactive mode")
 
 	input := flag.String("i", "", "Input directory with frames or video file (required)")
-	output := flag.String("o", "", "Output file path (optional, uses original filename)")
+	output := flag.String("o", "decoded", "Output file path or directory")
 	isVideo := flag.Bool("video", false, "Input is a video file (requires ffmpeg)")
 	fps := flag.Float64("fps", 1.0, "FPS for video frame extraction")
 	unique := flag.Bool("unique", true, "Extract only unique frames")
@@ -281,13 +286,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *output == "" {
-		filename := codec.ExtractFilenameFromFrames(framePaths)
-		if filename != "" {
-			*output = filename
-		} else {
-			*output = filepath.Base(*input) + "_restored"
+	filename := codec.ExtractFilenameFromFrames(framePaths)
+	if filename == "" {
+		filename = filepath.Base(*input) + "_restored"
+	}
+
+	if info, err := os.Stat(*output); err == nil && info.IsDir() {
+		*output = filepath.Join(*output, filename)
+		fmt.Printf("Output: %s\n", *output)
+	} else if *output == "decoded" || *output == "" {
+		*output = filepath.Join("decoded", filename)
+		if err := os.MkdirAll("decoded", 0755); err != nil {
+			fmt.Printf("Error creating decoded directory: %v\n", err)
+			os.Exit(1)
 		}
+		fmt.Printf("Output: %s\n", *output)
 	}
 
 	fmt.Printf("Found %d frames\n", len(framePaths))
