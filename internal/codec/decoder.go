@@ -107,28 +107,54 @@ func (d *Decoder) IsTelescopeFrame(img image.Image) bool {
 	width := bounds.Dx()
 	height := bounds.Dy()
 
-	whiteCount := 0
-	sampleCount := 0
-	for x := 0; x < width && sampleCount < 100; x += 10 {
-		c := img.At(x, 0)
-		r, g, b, _ := c.RGBA()
-		avg := (r + g + b) / 3
-		if avg > 15000 {
-			whiteCount++
-		}
-		sampleCount++
-	}
-	for y := 0; y < height && sampleCount < 200; y += 10 {
-		c := img.At(0, y)
-		r, g, b, _ := c.RGBA()
-		avg := (r + g + b) / 3
-		if avg > 15000 {
-			whiteCount++
-		}
-		sampleCount++
+	if width < 50 || height < 50 {
+		return false
 	}
 
-	return whiteCount >= sampleCount/3
+	for startX := 0; startX < 20; startX++ {
+		for startY := 0; startY < 20; startY++ {
+			mismatches := 0
+			for row := 0; row < 9; row++ {
+				for col := 0; col < 9; col++ {
+					x := startX + col*2 + 1
+					y := startY + row*2 + 1
+					if x >= width || y >= height {
+						mismatches++
+						continue
+					}
+					c := img.At(x, y)
+					r, g, b, _ := c.RGBA()
+					avg := (r + g + b) / 3
+
+					var neighborAvg uint32
+					if col+1 < 9 {
+						nc := img.At(x+2, y)
+						nr, ng, nb, _ := nc.RGBA()
+						neighborAvg = (nr + ng + nb) / 3
+					} else if row+1 < 9 {
+						ny := startY + (row+1)*2 + 1
+						nc := img.At(x, ny)
+						nr, ng, nb, _ := nc.RGBA()
+						neighborAvg = (nr + ng + nb) / 3
+					} else {
+						neighborAvg = avg
+					}
+
+					isLighter := avg > neighborAvg
+					expectedWhite := (row+col)%2 == 0
+					if isLighter != expectedWhite {
+						mismatches++
+					}
+				}
+			}
+
+			if mismatches <= 10 {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (d *Decoder) findBorder(img image.Image) (int, int) {
@@ -566,8 +592,7 @@ func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error
 			continue
 		}
 
-		if metaInfo.BitDepth == 0 || metaInfo.FileSize == 0 {
-			logger(fmt.Sprintf("Skipping frame with invalid metadata: bitDepth=%d, fileSize=%d", metaInfo.BitDepth, metaInfo.FileSize))
+		if metaInfo.BitDepth == 0 || metaInfo.FileSize == 0 || metaInfo.DataRows > 1000 || metaInfo.DataCols > 2000 {
 			continue
 		}
 
