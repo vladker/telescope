@@ -126,6 +126,8 @@ type FrameInfo struct {
 	BigPixelsW    int
 	BigPixelsH    int
 	BorderW       int
+	BorderX       int
+	BorderY       int
 	DataBigPixels int
 }
 
@@ -145,27 +147,27 @@ func CalcFrameInfo(width, height int, pixelSize PixelSize, mode Mode) FrameInfo 
 	dataRows := bigPixelsH - 2*BorderBigPixels
 	if dataCols <= 0 || dataRows <= 0 {
 		return FrameInfo{
-			Width:          width,
-			Height:         height,
-			PixelSize:      pixelSize,
-			Mode:           mode,
-			BigPixelsW:     bigPixelsW,
-			BigPixelsH:     bigPixelsH,
-			BorderW:        borderPx,
-			DataBigPixels:  0,
+			Width:         width,
+			Height:        height,
+			PixelSize:     pixelSize,
+			Mode:          mode,
+			BigPixelsW:    bigPixelsW,
+			BigPixelsH:    bigPixelsH,
+			BorderW:       borderPx,
+			DataBigPixels: 0,
 		}
 	}
 	dataBigPixels := dataCols * dataRows
 
 	return FrameInfo{
-		Width:          width,
-		Height:         height,
-		PixelSize:      pixelSize,
-		Mode:           mode,
-		BigPixelsW:     bigPixelsW,
-		BigPixelsH:     bigPixelsH,
-		BorderW:        borderPx,
-		DataBigPixels:  dataBigPixels,
+		Width:         width,
+		Height:        height,
+		PixelSize:     pixelSize,
+		Mode:          mode,
+		BigPixelsW:    bigPixelsW,
+		BigPixelsH:    bigPixelsH,
+		BorderW:       borderPx,
+		DataBigPixels: dataBigPixels,
 	}
 }
 

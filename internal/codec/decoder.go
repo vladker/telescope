@@ -46,22 +46,23 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 	d.log("DetectFrameInfo: image is %dx%d", width, height)
 
 	var detectedPixelSize format.PixelSize
+	var borderOffsetX, borderOffsetY int
+
 	for ps := format.Pixel3x3; ps >= format.Pixel1x1; ps-- {
 		borderPx := int(ps) * format.BorderBigPixels
-		innerW := width - 2*borderPx
-		innerH := height - 2*borderPx
+		d.log("  Testing pixelSize=%d: borderPx=%d", ps, borderPx)
 
-		d.log("  Testing pixelSize=%d: borderPx=%d, innerW=%d, innerH=%d", ps, borderPx, innerW, innerH)
-
-		if innerW < 16 || innerH < 16 {
+		if borderPx*2 >= width || borderPx*2 >= height {
 			d.log("    Skipping: image too small for this pixel size")
 			continue
 		}
 
-		valid, matchPct := d.validateBorderDetailed(img, borderPx, int(ps))
-		d.log("    Border validation: valid=%v, match=%.1f%%", valid, matchPct*100)
+		offset, valid, matchPct := d.findBorderInImage(img, ps)
+		d.log("    Border search: offset=(%d,%d), valid=%v, match=%.1f%%", offset.x, offset.y, valid, matchPct*100)
 		if valid {
 			detectedPixelSize = ps
+			borderOffsetX = offset.x
+			borderOffsetY = offset.y
 			break
 		}
 	}
@@ -70,7 +71,7 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 		return format.FrameInfo{}, fmt.Errorf("%w: no valid border found in image", format.ErrNoBorderFound)
 	}
 
-	d.log("Detected pixelSize: %d", detectedPixelSize)
+	d.log("Detected pixelSize: %d, borderOffset: (%d, %d)", detectedPixelSize, borderOffsetX, borderOffsetY)
 
 	borderPx := int(detectedPixelSize) * format.BorderBigPixels
 	innerW := width - 2*borderPx
@@ -85,8 +86,8 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 	mode := format.ModeRobustValue
 	metaRow := format.BorderBigPixels
 	metaCol := format.BorderBigPixels
-	sampleGray := d.getBigPixelGray(img, metaCol, metaRow, int(detectedPixelSize), borderPx)
-	invertedGray := d.getBigPixelGray(img, metaCol, metaRow+1, int(detectedPixelSize), borderPx)
+	sampleGray := d.getBigPixelGrayWithBorder(img, metaCol, metaRow, int(detectedPixelSize), borderPx, borderOffsetX, borderOffsetY)
+	invertedGray := d.getBigPixelGrayWithBorder(img, metaCol, metaRow+1, int(detectedPixelSize), borderPx, borderOffsetX, borderOffsetY)
 	d.log("Meta sample: row=%d, col=%d, gray=%d, invertedGray=%d", metaRow, metaCol, sampleGray, invertedGray)
 
 	sampleDecoded := d.palette.Decode(sampleGray)
@@ -104,15 +105,145 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 	}
 
 	return format.FrameInfo{
-		Width:          width,
-		Height:         height,
-		PixelSize:      detectedPixelSize,
-		Mode:           mode,
-		BigPixelsW:     bigPixelsW,
-		BigPixelsH:     bigPixelsH,
-		BorderW:        borderPx,
-		DataBigPixels:  dataBigPixels,
+		Width:         width,
+		Height:        height,
+		PixelSize:     detectedPixelSize,
+		Mode:          mode,
+		BigPixelsW:    bigPixelsW,
+		BigPixelsH:    bigPixelsH,
+		BorderW:       borderPx,
+		BorderX:       borderOffsetX,
+		BorderY:       borderOffsetY,
+		DataBigPixels: dataBigPixels,
 	}, nil
+}
+
+type point struct {
+	x, y int
+}
+
+func (d *Decoder) findBorderInImage(img image.Image, pixelSize format.PixelSize) (point, bool, float64) {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+	borderPx := int(pixelSize) * format.BorderBigPixels
+
+	step := int(pixelSize) * 2
+	if step < 4 {
+		step = 4
+	}
+
+	bestMatch := 0.0
+	bestOffset := point{0, 0}
+	bestValid := false
+
+	for y := 0; y < height-borderPx*2; y += step {
+		for x := 0; x < width-borderPx*2; x += step {
+			valid, matchPct := d.validateBorderAtOffset(img, x, y, borderPx, int(pixelSize))
+			if valid && matchPct > bestMatch {
+				bestMatch = matchPct
+				bestOffset = point{x, y}
+				bestValid = true
+			}
+		}
+	}
+
+	return bestOffset, bestValid, bestMatch
+}
+
+func (d *Decoder) validateBorderAtOffset(img image.Image, offsetX, offsetY, borderPx, pixelSize int) (bool, float64) {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	matchCount := 0
+	totalChecks := 0
+
+	for i := 0; i < 8*pixelSize; i += pixelSize {
+		for check := 0; check < 4; check++ {
+			x := offsetX + i
+			y := offsetY + check*pixelSize
+			if x >= width || y >= height {
+				continue
+			}
+			bigX := i / pixelSize
+			bigY := check
+			gray := d.getBigPixelGrayAt(img, x, y, pixelSize)
+			totalChecks++
+			expected := 0
+			if (bigX+bigY)%2 == 0 {
+				expected = 255
+			}
+			if int(gray) == expected || (gray > 240 && expected == 255) || (gray < 15 && expected == 0) {
+				matchCount++
+			}
+		}
+	}
+
+	for i := 0; i < 8*pixelSize; i += pixelSize {
+		for check := 0; check < 4; check++ {
+			x := offsetX + check*pixelSize
+			y := offsetY + i
+			if x >= width || y >= height {
+				continue
+			}
+			bigX := check
+			bigY := i / pixelSize
+			gray := d.getBigPixelGrayAt(img, x, y, pixelSize)
+			totalChecks++
+			expected := 0
+			if (bigX+bigY)%2 == 0 {
+				expected = 255
+			}
+			if int(gray) == expected || (gray > 240 && expected == 255) || (gray < 15 && expected == 0) {
+				matchCount++
+			}
+		}
+	}
+
+	if totalChecks == 0 {
+		return false, 0
+	}
+	return matchCount > totalChecks*7/10, float64(matchCount) / float64(totalChecks)
+}
+
+func (d *Decoder) getBigPixelGrayAt(img image.Image, x, y, size int) uint8 {
+	var sum uint32
+	count := 0
+	bounds := img.Bounds()
+	for py := y; py < y+size && py < bounds.Max.Y; py++ {
+		for px := x; px < x+size && px < bounds.Max.X; px++ {
+			var gray uint8
+			switch m := img.(type) {
+			case *image.Gray:
+				gray = m.GrayAt(px, py).Y
+			case *image.RGBA:
+				pixel := m.RGBAAt(px, py)
+				gray = uint8((int(pixel.R) + int(pixel.G) + int(pixel.B)) / 3)
+			default:
+				r, g, b, _ := img.At(px, py).RGBA()
+				gray = uint8((int(r) + int(g) + int(b)) / 3 >> 8)
+			}
+			sum += uint32(gray)
+			count++
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	return uint8(sum / uint32(count))
+}
+
+func (d *Decoder) getBigPixelGrayAtOffset(img image.Image, bigX, bigY, size, offsetX, offsetY int) uint8 {
+	startX := offsetX + bigX*size
+	startY := offsetY + bigY*size
+	return d.getBigPixelGrayAt(img, startX, startY, size)
+}
+
+func (d *Decoder) getBigPixelGrayWithBorder(img image.Image, bigX, bigY, size, borderPx, borderX, borderY int) uint8 {
+	startX := borderX + borderPx + bigX*size
+	startY := borderY + borderPx + bigY*size
+	return d.getBigPixelGrayAt(img, startX, startY, size)
 }
 
 func (d *Decoder) validateBorder(img image.Image, borderPx, pixelSize int) bool {
@@ -203,6 +334,8 @@ func (d *Decoder) readHeaderFromImage(img image.Image) ([]byte, format.FrameInfo
 
 	borderPx := fi.BorderW
 	ps := int(fi.PixelSize)
+	borderX := fi.BorderX
+	borderY := fi.BorderY
 
 	var headerData []byte
 	var headerRows int
@@ -214,14 +347,14 @@ func (d *Decoder) readHeaderFromImage(img image.Image) ([]byte, format.FrameInfo
 		if headerBigPixels%colsPerRow != 0 {
 			headerRows++
 		}
-		headerData = d.readDenseData(img, format.BorderBigPixels, headerRows, colsPerRow, colsPerRow, fi.BigPixelsH, ps, borderPx, format.HeaderSize)
+		headerData = d.readDenseDataWithBorder(img, format.BorderBigPixels, headerRows, colsPerRow, colsPerRow, fi.BigPixelsH, ps, borderPx, borderX, borderY, format.HeaderSize)
 	} else {
 		for row := format.BorderBigPixels; row < format.BorderBigPixels*2; row++ {
 			for col := format.BorderBigPixels; col < fi.BigPixelsW-format.BorderBigPixels; col++ {
 				if len(headerData) >= format.HeaderSize {
 					break
 				}
-				gray := d.getBigPixelGray(img, col, row, ps, borderPx)
+				gray := d.getBigPixelGrayWithBorder(img, col, row, ps, borderPx, borderX, borderY)
 				headerData = append(headerData, gray)
 			}
 		}
@@ -255,6 +388,8 @@ func (d *Decoder) DecodeFrameWithSkip(img image.Image, skipCRC bool) ([]byte, *f
 
 	borderPx := fi.BorderW
 	ps := int(fi.PixelSize)
+	borderX := fi.BorderX
+	borderY := fi.BorderY
 	colsPerRow := fi.BigPixelsW - 2*format.BorderBigPixels
 
 	var frameData []byte
@@ -265,14 +400,14 @@ func (d *Decoder) DecodeFrameWithSkip(img image.Image, skipCRC bool) ([]byte, *f
 		}
 		dataStartRow := format.BorderBigPixels + headerRows
 		frameDataRows := fi.BigPixelsH - format.BorderBigPixels - headerRows
-		frameData = d.readDenseData(img, dataStartRow, frameDataRows, colsPerRow, colsPerRow, fi.BigPixelsH, ps, borderPx, int(header.DataSize))
+		frameData = d.readDenseDataWithBorder(img, dataStartRow, frameDataRows, colsPerRow, colsPerRow, fi.BigPixelsH, ps, borderPx, borderX, borderY, int(header.DataSize))
 	} else {
 		dataStartRow := format.BorderBigPixels * 2
 		dataEndRow := fi.BigPixelsH - format.BorderBigPixels
 
 		for row := dataStartRow; row < dataEndRow; row++ {
 			for col := format.BorderBigPixels; col < fi.BigPixelsW-format.BorderBigPixels; col++ {
-				gray := d.getBigPixelGray(img, col, row, ps, borderPx)
+				gray := d.getBigPixelGrayWithBorder(img, col, row, ps, borderPx, borderX, borderY)
 				frameData = append(frameData, gray)
 
 				if uint32(len(frameData)) >= header.DataSize {
@@ -299,6 +434,10 @@ func (d *Decoder) DecodeFrameWithSkip(img image.Image, skipCRC bool) ([]byte, *f
 }
 
 func (d *Decoder) readDenseData(img image.Image, startRow, rows, maxColsPerRow, dataColsPerRow, bigPixelsH, px, borderPx, maxBytes int) []byte {
+	return d.readDenseDataWithOffset(img, startRow, rows, maxColsPerRow, dataColsPerRow, bigPixelsH, px, borderPx, 0, 0, maxBytes)
+}
+
+func (d *Decoder) readDenseDataWithOffset(img image.Image, startRow, rows, maxColsPerRow, dataColsPerRow, bigPixelsH, px, borderPx, borderX, borderY, maxBytes int) []byte {
 	if dataColsPerRow <= 0 {
 		return nil
 	}
@@ -306,21 +445,21 @@ func (d *Decoder) readDenseData(img image.Image, startRow, rows, maxColsPerRow, 
 	var result []byte
 	for row := startRow; row < startRow+rows && row < bigPixelsH-format.BorderBigPixels && len(result) < maxBytes; row++ {
 		colsThisRow := maxColsPerRow
-		
+
 		bytesNeeded := maxBytes - len(result)
 		nibblesNeeded := bytesNeeded * 2
 		if nibblesNeeded < colsThisRow {
 			colsThisRow = nibblesNeeded
 		}
-		
+
 		col := format.BorderBigPixels
 		for col < format.BorderBigPixels+colsThisRow && len(result) < maxBytes {
-			highGray := d.getBigPixelGray(img, col, row, px, borderPx)
+			highGray := d.getBigPixelGrayWithBorder(img, col, row, px, borderPx, borderX, borderY)
 			highNibble := d.palette.Decode(highGray)
 
 			col++
 			if col < format.BorderBigPixels+colsThisRow && len(result) < maxBytes {
-				lowGray := d.getBigPixelGray(img, col, row, px, borderPx)
+				lowGray := d.getBigPixelGrayWithBorder(img, col, row, px, borderPx, borderX, borderY)
 				lowNibble := d.palette.Decode(lowGray)
 
 				result = append(result, (highNibble<<4)|lowNibble)
@@ -331,6 +470,10 @@ func (d *Decoder) readDenseData(img image.Image, startRow, rows, maxColsPerRow, 
 		}
 	}
 	return result
+}
+
+func (d *Decoder) readDenseDataWithBorder(img image.Image, startRow, rows, maxColsPerRow, dataColsPerRow, bigPixelsH, px, borderPx, borderX, borderY, maxBytes int) []byte {
+	return d.readDenseDataWithOffset(img, startRow, rows, maxColsPerRow, dataColsPerRow, bigPixelsH, px, borderPx, borderX, borderY, maxBytes)
 }
 
 func (d *Decoder) LoadImage(path string) (image.Image, error) {
