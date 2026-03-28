@@ -37,40 +37,30 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 	width := bounds.Dx()
 	height := bounds.Dy()
 
-	borderPx := format.BorderWidth
-	pixelSize := 2
-
-	borderC := img.At(0, 0)
-	borderR, borderG, borderB, _ := borderC.RGBA()
-	borderAvg := (borderR + borderG + borderB) / 3
-
-	offsetY := 0
-	if borderAvg < 10000 {
-		for y := 0; y < height; y++ {
-			c := img.At(borderPx, y)
-			r, g, b, _ := c.RGBA()
-			avg := (r + g + b) / 3
-			if avg > 10000 {
-				offsetY = y - borderPx
-				break
-			}
-		}
+	startMarker, pixelSize, found := d.findTemplateAnywhere(img)
+	if !found {
+		return format.FrameInfo{}, fmt.Errorf("could not find telescope template in image")
 	}
 
-	templateStartY := borderPx + offsetY
-	templateStartX := borderPx
+	d.log("Found template at (%d,%d) with pixelSize=%d", startMarker.X, startMarker.Y, pixelSize)
 
-	metaStartX := templateStartX + format.TemplateSize*pixelSize
-	metaStartY := templateStartY + format.TemplateSize*pixelSize
+	startMarkerEnd := d.findTemplateAnywhereAt(img, startMarker.X, startMarker.Y+pixelSize*format.TemplateSize+10, pixelSize)
+	if startMarkerEnd.X == 0 && startMarkerEnd.Y == 0 {
+		startMarkerEnd = format.Point{X: startMarker.X, Y: startMarker.Y + pixelSize*format.TemplateSize}
+	}
+
+	templatePx := format.TemplateSize * pixelSize
+	dataStartY := startMarkerEnd.Y + templatePx
 
 	foundDataY := -1
-	for y := metaStartY; y < metaStartY+50 && y < height; y++ {
+	for y := dataStartY; y < dataStartY+200 && y < height; y++ {
 		hasData := false
-		for x := metaStartX; x < metaStartX+50 && x < width; x++ {
+		sampleX := startMarker.X + templatePx + pixelSize
+		for x := sampleX; x < sampleX+100 && x < width; x++ {
 			c := img.At(x, y)
 			r, g, b, _ := c.RGBA()
 			avg := (r + g + b) / 3
-			if avg > 10000 {
+			if avg > 5000 {
 				hasData = true
 				break
 			}
@@ -80,26 +70,181 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 			break
 		}
 	}
-	if foundDataY > metaStartY {
-		templateStartY = foundDataY - format.TemplateSize*pixelSize
+
+	if foundDataY < 0 {
+		foundDataY = dataStartY
 	}
 
-	startMarker := format.Point{X: templateStartX, Y: templateStartY}
+	dataRows := (height - foundDataY) / pixelSize
+	dataCols := (width - startMarker.X - 2*templatePx) / pixelSize
 
-	templatePx := format.TemplateSize * pixelSize
-	innerW := width - 2*borderPx - 2*templatePx
-	innerH := height - 2*borderPx - 2*templatePx
+	if dataCols < 50 || dataRows < 10 {
+		return format.FrameInfo{}, fmt.Errorf("data area too small: %dx%d", dataCols, dataRows)
+	}
 
 	return format.FrameInfo{
 		Width:       width,
 		Height:      height,
 		PixelSize:   pixelSize,
-		BorderPx:    borderPx,
-		DataCols:    innerW / pixelSize,
-		DataRows:    innerH / pixelSize,
+		BorderPx:    0,
+		DataCols:    dataCols,
+		DataRows:    dataRows,
 		StartMarker: startMarker,
-		EndMarker:   format.Point{X: width - borderPx - templatePx, Y: height - borderPx - templatePx},
+		EndMarker:   format.Point{X: width, Y: height},
 	}, nil
+}
+
+func (d *Decoder) findTemplateAnywhere(img image.Image) (format.Point, int, bool) {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	type candidate struct {
+		x, y, score int
+		ps          int
+	}
+	var candidates []candidate
+
+	for pixelSize := 1; pixelSize <= 5; pixelSize++ {
+		step := pixelSize * 3
+		if step < 5 {
+			step = 5
+		}
+
+		for y := 0; y < height-format.TemplateSize*pixelSize; y += step {
+			for x := 0; x < width-format.TemplateSize*pixelSize; x += step {
+				score := d.quickTemplateScore(img, x, y, pixelSize)
+				if score > 60 {
+					candidates = append(candidates, candidate{x, y, score, pixelSize})
+				}
+			}
+		}
+	}
+
+	for _, c := range candidates {
+		if d.checkTemplateAt(img, c.x, c.y, c.ps, 10) {
+			return format.Point{X: c.x, Y: c.y}, c.ps, true
+		}
+	}
+
+	return format.Point{}, 0, false
+}
+
+func (d *Decoder) quickTemplateScore(img image.Image, startX, startY, pixelSize int) int {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	score := 0
+	for row := 0; row < format.TemplateSize; row++ {
+		for col := 0; col < format.TemplateSize; col++ {
+			if row == format.TemplateSize-1 && col == format.TemplateSize-1 {
+				continue
+			}
+
+			x := startX + col*pixelSize + pixelSize/2
+			y := startY + row*pixelSize + pixelSize/2
+
+			if x >= width || y >= height {
+				continue
+			}
+
+			c := img.At(x, y)
+			r, g, b, _ := c.RGBA()
+			avg := (r + g + b) / 3
+
+			var neighborAvg uint32
+			if col+1 < format.TemplateSize && x+pixelSize < width {
+				nx := x + pixelSize
+				nc := img.At(nx, y)
+				nr, ng, nb, _ := nc.RGBA()
+				neighborAvg = (nr + ng + nb) / 3
+			} else if y+pixelSize < height {
+				ny := y + pixelSize
+				nc := img.At(x, ny)
+				nr, ng, nb, _ := nc.RGBA()
+				neighborAvg = (nr + ng + nb) / 3
+			} else {
+				continue
+			}
+
+			isLighter := avg > neighborAvg
+			expectedWhite := (row+col)%2 == 0
+			if isLighter == expectedWhite {
+				score++
+			}
+		}
+	}
+
+	return score
+}
+
+func (d *Decoder) findTemplateAnywhereAt(img image.Image, startX, startY, pixelSize int) format.Point {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	templatePx := format.TemplateSize * pixelSize
+	searchW := 100
+	searchH := 100
+
+	for y := startY; y < startY+searchH && y < height-templatePx; y++ {
+		for x := startX; x < startX+searchW && x < width-templatePx; x++ {
+			if d.checkTemplateAt(img, x, y, pixelSize, 5) {
+				return format.Point{X: x, Y: y}
+			}
+		}
+	}
+
+	return format.Point{}
+}
+
+func (d *Decoder) checkTemplateAt(img image.Image, startX, startY, pixelSize, maxMismatches int) bool {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	mismatches := 0
+	for row := 0; row < format.TemplateSize; row++ {
+		for col := 0; col < format.TemplateSize; col++ {
+			if row == format.TemplateSize-1 && col == format.TemplateSize-1 {
+				continue
+			}
+
+			x := startX + col*pixelSize + pixelSize/2
+			y := startY + row*pixelSize + pixelSize/2
+
+			if x >= width || y >= height {
+				mismatches++
+				continue
+			}
+
+			c := img.At(x, y)
+			r, g, b, _ := c.RGBA()
+			avg := (r + g + b) / 3
+
+			var neighborAvg uint32
+			if col+1 < format.TemplateSize {
+				nx := startX + (col+1)*pixelSize + pixelSize/2
+				nc := img.At(nx, y)
+				nr, ng, nb, _ := nc.RGBA()
+				neighborAvg = (nr + ng + nb) / 3
+			} else {
+				ny := startY + (row+1)*pixelSize + pixelSize/2
+				nc := img.At(x, ny)
+				nr, ng, nb, _ := nc.RGBA()
+				neighborAvg = (nr + ng + nb) / 3
+			}
+
+			isLighter := avg > neighborAvg
+			expectedWhite := (row+col)%2 == 0
+			if isLighter != expectedWhite {
+				mismatches++
+			}
+		}
+	}
+
+	return mismatches <= maxMismatches
 }
 
 func (d *Decoder) IsTelescopeFrame(img image.Image) bool {
@@ -111,50 +256,8 @@ func (d *Decoder) IsTelescopeFrame(img image.Image) bool {
 		return false
 	}
 
-	for startX := 0; startX < 20; startX++ {
-		for startY := 0; startY < 20; startY++ {
-			mismatches := 0
-			for row := 0; row < 9; row++ {
-				for col := 0; col < 9; col++ {
-					x := startX + col*2 + 1
-					y := startY + row*2 + 1
-					if x >= width || y >= height {
-						mismatches++
-						continue
-					}
-					c := img.At(x, y)
-					r, g, b, _ := c.RGBA()
-					avg := (r + g + b) / 3
-
-					var neighborAvg uint32
-					if col+1 < 9 {
-						nc := img.At(x+2, y)
-						nr, ng, nb, _ := nc.RGBA()
-						neighborAvg = (nr + ng + nb) / 3
-					} else if row+1 < 9 {
-						ny := startY + (row+1)*2 + 1
-						nc := img.At(x, ny)
-						nr, ng, nb, _ := nc.RGBA()
-						neighborAvg = (nr + ng + nb) / 3
-					} else {
-						neighborAvg = avg
-					}
-
-					isLighter := avg > neighborAvg
-					expectedWhite := (row+col)%2 == 0
-					if isLighter != expectedWhite {
-						mismatches++
-					}
-				}
-			}
-
-			if mismatches <= 10 {
-				return true
-			}
-		}
-	}
-
-	return false
+	_, _, found := d.findTemplateAnywhere(img)
+	return found
 }
 
 func (d *Decoder) findBorder(img image.Image) (int, int) {
@@ -580,11 +683,15 @@ func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error
 			continue
 		}
 
+		logger(fmt.Sprintf("Found telescope frame: %s", filepath.Base(path)))
+
 		fi, err := decoder.DetectFrameInfo(img)
 		if err != nil {
 			logger(fmt.Sprintf("Warning: failed to detect frame info for %s: %v", path, err))
 			continue
 		}
+
+		logger(fmt.Sprintf("Frame info: pixelSize=%d, DataCols=%d, DataRows=%d", fi.PixelSize, fi.DataCols, fi.DataRows))
 
 		data, metaInfo, err := decoder.DecodeImageWithMeta(img, fi)
 		if err != nil {
@@ -592,7 +699,11 @@ func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error
 			continue
 		}
 
-		if metaInfo.BitDepth == 0 || metaInfo.FileSize == 0 || metaInfo.DataRows > 1000 || metaInfo.DataCols > 2000 {
+		logger(fmt.Sprintf("Meta: bitDepth=%d, fileSize=%d, filename=%s, blocks=%d/%d",
+			metaInfo.BitDepth, metaInfo.FileSize, metaInfo.FileName, metaInfo.BlockIndex+1, metaInfo.TotalBlocks))
+
+		if metaInfo.BitDepth == 0 || metaInfo.FileSize == 0 || metaInfo.DataRows > 10000 || metaInfo.DataCols > 10000 {
+			logger(fmt.Sprintf("Warning: invalid metadata in %s", filepath.Base(path)))
 			continue
 		}
 
