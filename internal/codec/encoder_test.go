@@ -464,11 +464,6 @@ func TestEncodeFile(t *testing.T) {
 		t.Errorf("Expected at least 1 frame, got %d", frames)
 	}
 
-	manifestPath := filepath.Join(outputDir, "manifest.json")
-	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
-		t.Error("Manifest file not created")
-	}
-
 	framePath := filepath.Join(outputDir, "frame_0000.png")
 	if _, err := os.Stat(framePath); os.IsNotExist(err) {
 		t.Error("Frame file not created")

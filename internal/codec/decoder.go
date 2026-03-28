@@ -1,7 +1,6 @@
 package codec
 
 import (
-	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"image"
@@ -469,31 +468,6 @@ func ReconstructFile(frames map[uint32][]byte, outputPath string) error {
 	}
 
 	return nil
-}
-
-type Manifest struct {
-	Version     int    `json:"version"`
-	Filename    string `json:"filename"`
-	TotalSize   uint32 `json:"total_size"`
-	TotalFrames uint32 `json:"total_frames"`
-	Width       int    `json:"width"`
-	Height      int    `json:"height"`
-	PixelSize   int    `json:"pixel_size"`
-	Mode        string `json:"mode"`
-}
-
-func ReadManifest(dir string) (*Manifest, error) {
-	path := filepath.Join(dir, "manifest.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var m Manifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, err
-	}
-	return &m, nil
 }
 
 func ExtractFilenameFromFrames(framePaths []string) string {

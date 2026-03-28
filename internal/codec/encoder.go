@@ -323,29 +323,6 @@ func EncodeFile(inputPath, outputDir string, width, height int, pixelSize format
 		frameNum++
 	}
 
-	var modeStr string
-	if mode == format.ModeDenseValue {
-		modeStr = "dense"
-	} else {
-		modeStr = "robust"
-	}
-
-	manifest := fmt.Sprintf(`{
-  "version": %d,
-  "filename": "%s",
-  "total_size": %d,
-  "total_frames": %d,
-  "width": %d,
-  "height": %d,
-  "pixel_size": %d,
-  "mode": "%s"
-}`, format.Version, filepath.Base(inputPath), totalSize, totalFrames, width, height, pixelSize, modeStr)
-
-	manifestPath := filepath.Join(outputDir, "manifest.json")
-	if err := os.WriteFile(manifestPath, []byte(manifest), 0644); err != nil {
-		return int(frameNum), fmt.Errorf("failed to write manifest: %w", err)
-	}
-
 	logger(fmt.Sprintf("Encoding complete: %d frames saved to %s", frameNum, outputDir))
 	return int(frameNum), nil
 }
