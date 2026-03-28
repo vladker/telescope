@@ -566,6 +566,11 @@ func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error
 			continue
 		}
 
+		if metaInfo.BitDepth == 0 || metaInfo.FileSize == 0 {
+			logger(fmt.Sprintf("Skipping frame with invalid metadata: bitDepth=%d, fileSize=%d", metaInfo.BitDepth, metaInfo.FileSize))
+			continue
+		}
+
 		block := &FrameBlock{
 			Index:       int(metaInfo.BlockIndex),
 			Data:        data,
