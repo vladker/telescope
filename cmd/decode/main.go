@@ -185,6 +185,9 @@ func interactiveMode() {
 	if output == "decoded" {
 		os.MkdirAll("decoded", 0755)
 		outputPath = filepath.Join("decoded", filename)
+	} else if filepath.Ext(output) == "" {
+		os.MkdirAll(output, 0755)
+		outputPath = filepath.Join(output, filename)
 	}
 
 	if err := codec.SaveFile(data, outputPath); err != nil {
@@ -285,6 +288,9 @@ func main() {
 
 			outputPath := *output
 			if info, err := os.Stat(*output); err == nil && info.IsDir() {
+				outputPath = filepath.Join(*output, filename)
+			} else if *output == "decoded" || filepath.Ext(*output) == "" {
+				os.MkdirAll(*output, 0755)
 				outputPath = filepath.Join(*output, filename)
 			}
 

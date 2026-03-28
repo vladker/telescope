@@ -22,10 +22,12 @@ const (
 	MetaDataCols    = 2
 	MetaTotalBlocks = 2
 	MetaBlockIndex  = 2
+	MetaFECBlocks   = 1
+	MetaFECGroup    = 1
 	MetaSeparator   = 1
 	MetaFileNameMax = 32
 
-	MetaMinBytes   = MetaBitDepth + MetaFileSize + MetaFileNameLen + MetaCRC32 + MetaDataRows + MetaDataCols + MetaTotalBlocks + MetaBlockIndex + MetaSeparator
+	MetaMinBytes   = MetaBitDepth + MetaFileSize + MetaFileNameLen + MetaCRC32 + MetaDataRows + MetaDataCols + MetaTotalBlocks + MetaBlockIndex + MetaFECBlocks + MetaFECGroup + MetaSeparator
 	MetaFixedBytes = MetaMinBytes + MetaFileNameMax
 	MetaFixedBits  = MetaFixedBytes * 8
 )
@@ -39,6 +41,8 @@ type MetaInfo struct {
 	DataCols    uint16
 	TotalBlocks uint16
 	BlockIndex  uint16
+	FECBlocks   uint8
+	FECGroup    uint8
 }
 
 func (m *MetaInfo) Serialize() []byte {
@@ -65,6 +69,8 @@ func (m *MetaInfo) Serialize() []byte {
 	data = binary.LittleEndian.AppendUint16(data, m.DataCols)
 	data = binary.LittleEndian.AppendUint16(data, m.TotalBlocks)
 	data = binary.LittleEndian.AppendUint16(data, m.BlockIndex)
+	data = append(data, m.FECBlocks)
+	data = append(data, m.FECGroup)
 	data = append(data, SeparatorPattern)
 
 	return data
@@ -108,6 +114,12 @@ func ParseMeta(data []byte) (*MetaInfo, error) {
 
 	m.BlockIndex = binary.LittleEndian.Uint16(data[offset : offset+MetaBlockIndex])
 	offset += MetaBlockIndex
+
+	m.FECBlocks = data[offset]
+	offset += MetaFECBlocks
+
+	m.FECGroup = data[offset]
+	offset += MetaFECGroup
 
 	if data[offset] != SeparatorPattern {
 		return nil, ErrInvalidHeader

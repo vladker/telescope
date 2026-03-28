@@ -14,6 +14,8 @@ func TestMetaInfoSerializeParse(t *testing.T) {
 		DataCols:    50,
 		TotalBlocks: 3,
 		BlockIndex:  1,
+		FECBlocks:   2,
+		FECGroup:    10,
 	}
 
 	data := meta.Serialize()
@@ -50,10 +52,16 @@ func TestMetaInfoSerializeParse(t *testing.T) {
 	if parsed.BlockIndex != meta.BlockIndex {
 		t.Errorf("BlockIndex: expected %d, got %d", meta.BlockIndex, parsed.BlockIndex)
 	}
+	if parsed.FECBlocks != meta.FECBlocks {
+		t.Errorf("FECBlocks: expected %d, got %d", meta.FECBlocks, parsed.FECBlocks)
+	}
+	if parsed.FECGroup != meta.FECGroup {
+		t.Errorf("FECGroup: expected %d, got %d", meta.FECGroup, parsed.FECGroup)
+	}
 }
 
 func TestMetaFixedBytes(t *testing.T) {
-	expected := MetaBitDepth + MetaFileSize + MetaFileNameLen + MetaCRC32 + MetaDataRows + MetaDataCols + MetaTotalBlocks + MetaBlockIndex + MetaSeparator + MetaFileNameMax
+	expected := MetaBitDepth + MetaFileSize + MetaFileNameLen + MetaCRC32 + MetaDataRows + MetaDataCols + MetaTotalBlocks + MetaBlockIndex + MetaFECBlocks + MetaFECGroup + MetaSeparator + MetaFileNameMax
 	if MetaFixedBytes != expected {
 		t.Errorf("MetaFixedBytes: expected %d, got %d (components sum: %d)", expected, MetaFixedBytes, expected)
 	}

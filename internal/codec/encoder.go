@@ -69,6 +69,10 @@ func (e *Encoder) MaxBytesPerFrame() int {
 }
 
 func (e *Encoder) EncodeFile(data []byte, filename string, totalBlocks, blockIndex uint16) (*image.Gray, error) {
+	return e.EncodeFileWithFEC(data, filename, totalBlocks, blockIndex, 0, 0)
+}
+
+func (e *Encoder) EncodeFileWithFEC(data []byte, filename string, totalBlocks, blockIndex uint16, fecBlocks, fecGroup uint8) (*image.Gray, error) {
 	fi := e.FrameInfo()
 	e.log("EncodeFile: width=%d, height=%d, pixelSize=%d, bitDepth=%d, block=%d/%d",
 		e.width, e.height, e.pixelSize, e.bitDepth, blockIndex, totalBlocks)
@@ -85,21 +89,23 @@ func (e *Encoder) EncodeFile(data []byte, filename string, totalBlocks, blockInd
 		DataCols:    uint16(fi.DataCols),
 		TotalBlocks: totalBlocks,
 		BlockIndex:  blockIndex,
+		FECBlocks:   fecBlocks,
+		FECGroup:    fecGroup,
 	}
 	metaInfo.SetCRC(data)
 	metaData := metaInfo.Serialize()
 
 	img := image.NewGray(image.Rect(0, 0, e.width, e.height))
-	e.drawBorder(img)
-	e.drawTemplate(img, fi.StartMarker.X, fi.StartMarker.Y)
-	e.drawMetaData(img, metaData, fi)
-	e.drawData(img, data, metaInfo, fi)
-	e.drawTemplate(img, fi.EndMarker.X, fi.EndMarker.Y)
+	e.DrawBorder(img)
+	e.DrawTemplate(img, fi.StartMarker.X, fi.StartMarker.Y)
+	e.DrawMetaData(img, metaData, fi)
+	e.DrawData(img, data, metaInfo, fi)
+	e.DrawTemplate(img, fi.EndMarker.X, fi.EndMarker.Y)
 
 	return img, nil
 }
 
-func (e *Encoder) drawBorder(img *image.Gray) {
+func (e *Encoder) DrawBorder(img *image.Gray) {
 	bounds := img.Bounds()
 	borderPx := format.BorderWidth
 
@@ -113,7 +119,7 @@ func (e *Encoder) drawBorder(img *image.Gray) {
 	}
 }
 
-func (e *Encoder) drawTemplate(img *image.Gray, startX, startY int) {
+func (e *Encoder) DrawTemplate(img *image.Gray, startX, startY int) {
 	px := e.pixelSize
 
 	for row := 0; row < format.TemplateSize; row++ {
@@ -128,7 +134,7 @@ func (e *Encoder) drawTemplate(img *image.Gray, startX, startY int) {
 	}
 }
 
-func (e *Encoder) drawMetaData(img *image.Gray, metaData []byte, fi format.FrameInfo) {
+func (e *Encoder) DrawMetaData(img *image.Gray, metaData []byte, fi format.FrameInfo) {
 	px := e.pixelSize
 	startX := fi.StartMarker.X + format.TemplateSize*px
 	startY := fi.StartMarker.Y + format.TemplateSize*px
@@ -167,7 +173,7 @@ func (e *Encoder) drawMetaData(img *image.Gray, metaData []byte, fi format.Frame
 	}
 }
 
-func (e *Encoder) drawData(img *image.Gray, data []byte, metaInfo *format.MetaInfo, fi format.FrameInfo) {
+func (e *Encoder) DrawData(img *image.Gray, data []byte, metaInfo *format.MetaInfo, fi format.FrameInfo) {
 	px := e.pixelSize
 	dataCols := int(metaInfo.DataCols)
 	dataRows := int(metaInfo.DataRows)
@@ -229,10 +235,25 @@ func (e *Encoder) SaveImage(img *image.Gray, path string) error {
 }
 
 func EncodeFile(inputPath, outputPath string, width, height, pixelSize, bitDepth int, logger func(string)) error {
-	return EncodeFileMulti(inputPath, outputPath, width, height, pixelSize, bitDepth, logger)
+	return EncodeFileMulti(inputPath, outputPath, filepath.Base(inputPath), width, height, pixelSize, bitDepth, logger)
 }
 
-func EncodeFileMulti(inputPath, outputPathPrefix string, width, height, pixelSize, bitDepth int, logger func(string)) error {
+func EncodeFileToDir(inputPath, outputDir string, width, height, pixelSize, bitDepth int, logger func(string)) error {
+	if logger == nil {
+		logger = func(string) {}
+	}
+
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	baseName := filepath.Base(inputPath)
+	outputPathPrefix := filepath.Join(outputDir, baseName)
+
+	return EncodeFileMulti(inputPath, outputPathPrefix, baseName, width, height, pixelSize, bitDepth, logger)
+}
+
+func EncodeFileMulti(inputPath, outputPathPrefix, filename string, width, height, pixelSize, bitDepth int, logger func(string)) error {
 	if logger == nil {
 		logger = func(string) {}
 	}
@@ -259,17 +280,24 @@ func EncodeFileMulti(inputPath, outputPathPrefix string, width, height, pixelSiz
 
 	logger(fmt.Sprintf("Splitting into %d block(s) (max %d bytes each)", totalBlocks, maxCapacity))
 
-	filename := filepath.Base(inputPath)
-
+	dataBlocks := make([][]byte, totalBlocks)
 	for blockIndex := uint16(0); blockIndex < totalBlocks; blockIndex++ {
 		start := int(blockIndex) * maxCapacity
 		end := start + maxCapacity
 		if end > len(data) {
 			end = len(data)
 		}
+		dataBlocks[blockIndex] = data[start:end]
+	}
 
-		chunk := data[start:end]
-		img, err := encoder.EncodeFile(chunk, filename, totalBlocks, blockIndex)
+	fecGroups := calculateFECGroups(int(totalBlocks))
+	fecBlocks := generateFECBlocks(dataBlocks, fecGroups)
+
+	totalWithFEC := totalBlocks + uint16(len(fecBlocks))
+	logger(fmt.Sprintf("Generating %d FEC block(s) for recovery", len(fecBlocks)))
+
+	for blockIndex := uint16(0); blockIndex < totalBlocks; blockIndex++ {
+		img, err := encoder.EncodeFileWithFEC(dataBlocks[blockIndex], filename, totalWithFEC, blockIndex, uint8(len(fecBlocks)), uint8(fecGroups))
 		if err != nil {
 			return fmt.Errorf("failed to encode block %d: %w", blockIndex, err)
 		}
@@ -278,27 +306,86 @@ func EncodeFileMulti(inputPath, outputPathPrefix string, width, height, pixelSiz
 		if err := encoder.SaveImage(img, outputPath); err != nil {
 			return fmt.Errorf("failed to save block %d: %w", blockIndex, err)
 		}
-		logger(fmt.Sprintf("Saved block %d/%d: %s (%d bytes)", blockIndex+1, totalBlocks, outputPath, len(chunk)))
+		logger(fmt.Sprintf("Saved block %d/%d: %s (%d bytes)", blockIndex+1, totalBlocks, outputPath, len(dataBlocks[blockIndex])))
+	}
+
+	for i, fecData := range fecBlocks {
+		fecIndex := totalBlocks + uint16(i)
+		fecMeta := &format.MetaInfo{
+			BitDepth:    uint8(bitDepth),
+			FileSize:    uint32(len(fecData)),
+			FileName:    filename,
+			DataRows:    uint16(encoder.FrameInfo().DataRows),
+			DataCols:    uint16(encoder.FrameInfo().DataCols),
+			TotalBlocks: totalWithFEC,
+			BlockIndex:  fecIndex,
+			FECBlocks:   uint8(len(fecBlocks)),
+			FECGroup:    uint8(fecGroups),
+		}
+		fecMeta.SetCRC(fecData)
+		fecDataSerialized := fecMeta.Serialize()
+
+		img := image.NewGray(image.Rect(0, 0, width, height))
+		encoder.DrawBorder(img)
+		encoder.DrawTemplate(img, encoder.FrameInfo().StartMarker.X, encoder.FrameInfo().StartMarker.Y)
+		encoder.DrawMetaData(img, fecDataSerialized, encoder.FrameInfo())
+		encoder.DrawData(img, fecData, fecMeta, encoder.FrameInfo())
+		encoder.DrawTemplate(img, encoder.FrameInfo().EndMarker.X, encoder.FrameInfo().EndMarker.Y)
+
+		outputPath := fmt.Sprintf("%s_%03d.png", outputPathPrefix, fecIndex)
+		if err := encoder.SaveImage(img, outputPath); err != nil {
+			return fmt.Errorf("failed to save FEC block %d: %w", i, err)
+		}
+		logger(fmt.Sprintf("Saved FEC block %d/%d: %s (%d bytes)", i+1, len(fecBlocks), outputPath, len(fecData)))
 	}
 
 	return nil
 }
 
-func EncodeFileToDir(inputPath, outputDir string, width, height, pixelSize, bitDepth int, logger func(string)) error {
-	if logger == nil {
-		logger = func(string) {}
+func calculateFECGroups(numBlocks int) int {
+	if numBlocks <= 5 {
+		return numBlocks
+	}
+	return 10
+}
+
+func generateFECBlocks(dataBlocks [][]byte, groupSize int) [][]byte {
+	if len(dataBlocks) < 2 {
+		return nil
 	}
 
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory: %w", err)
+	var fecBlocks [][]byte
+	maxLen := 0
+	for _, block := range dataBlocks {
+		if len(block) > maxLen {
+			maxLen = len(block)
+		}
 	}
 
-	filename := filepath.Base(inputPath)
-	if ext := filepath.Ext(filename); ext != "" {
-		filename = filename[:len(ext)]
+	numGroups := (len(dataBlocks) + groupSize - 1) / groupSize
+
+	for g := 0; g < numGroups; g++ {
+		start := g * groupSize
+		end := start + groupSize
+		if end > len(dataBlocks) {
+			end = len(dataBlocks)
+		}
+
+		fec := make([]byte, maxLen)
+		for i := start; i < end; i++ {
+			for j := 0; j < len(dataBlocks[i]); j++ {
+				fec[j] ^= dataBlocks[i][j]
+			}
+		}
+
+		paddingLen := 0
+		for i := start; i < end; i++ {
+			if len(dataBlocks[i]) > paddingLen {
+				paddingLen = len(dataBlocks[i])
+			}
+		}
+		fecBlocks = append(fecBlocks, fec[:paddingLen])
 	}
 
-	outputPathPrefix := filepath.Join(outputDir, filename)
-
-	return EncodeFileMulti(inputPath, outputPathPrefix, width, height, pixelSize, bitDepth, logger)
+	return fecBlocks
 }

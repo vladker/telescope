@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"telescope/internal/format"
 )
@@ -89,7 +90,7 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 	innerW := width - 2*borderPx - 2*templatePx
 	innerH := height - 2*borderPx - 2*templatePx
 
-	fi := format.FrameInfo{
+	return format.FrameInfo{
 		Width:       width,
 		Height:      height,
 		PixelSize:   pixelSize,
@@ -98,9 +99,36 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 		DataRows:    innerH / pixelSize,
 		StartMarker: startMarker,
 		EndMarker:   format.Point{X: width - borderPx - templatePx, Y: height - borderPx - templatePx},
+	}, nil
+}
+
+func (d *Decoder) IsTelescopeFrame(img image.Image) bool {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	whiteCount := 0
+	sampleCount := 0
+	for x := 0; x < width && sampleCount < 100; x += 10 {
+		c := img.At(x, 0)
+		r, g, b, _ := c.RGBA()
+		avg := (r + g + b) / 3
+		if avg > 15000 {
+			whiteCount++
+		}
+		sampleCount++
+	}
+	for y := 0; y < height && sampleCount < 200; y += 10 {
+		c := img.At(0, y)
+		r, g, b, _ := c.RGBA()
+		avg := (r + g + b) / 3
+		if avg > 15000 {
+			whiteCount++
+		}
+		sampleCount++
 	}
 
-	return fi, nil
+	return whiteCount >= sampleCount/3
 }
 
 func (d *Decoder) findBorder(img image.Image) (int, int) {
@@ -476,6 +504,7 @@ type FrameBlock struct {
 	TotalBlocks int
 	FileName    string
 	FileSize    int
+	IsFEC       bool
 }
 
 func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error) {
@@ -495,6 +524,8 @@ func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error
 		}
 	}
 
+	sort.Strings(pngFiles)
+
 	if len(pngFiles) == 0 {
 		return nil, "", fmt.Errorf("no PNG files found in directory")
 	}
@@ -503,14 +534,23 @@ func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error
 
 	decoder := NewDecoderWithLogger(logger)
 	blocks := make([]*FrameBlock, 0, len(pngFiles))
+	dataBlocks := make(map[int]*FrameBlock)
+	fecBlocks := make([]*FrameBlock, 0)
 	var totalBlocks int
-	var expectedFileSize int
+	var fecBlocksCount int
+	var fecGroupSize int
 	var expectedFileName string
+	var maxBlockSize int
 
 	for _, path := range pngFiles {
 		img, err := decoder.LoadImage(path)
 		if err != nil {
 			logger(fmt.Sprintf("Warning: failed to load %s: %v", path, err))
+			continue
+		}
+
+		if !decoder.IsTelescopeFrame(img) {
+			logger(fmt.Sprintf("Skipping non-telescope frame: %s", filepath.Base(path)))
 			continue
 		}
 
@@ -533,11 +573,25 @@ func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error
 			FileName:    metaInfo.FileName,
 			FileSize:    int(metaInfo.FileSize),
 		}
+
+		if int(metaInfo.BlockIndex) >= int(metaInfo.TotalBlocks)-int(metaInfo.FECBlocks) {
+			block.IsFEC = true
+			fecBlocks = append(fecBlocks, block)
+			if fecBlocksCount == 0 {
+				fecBlocksCount = int(metaInfo.FECBlocks)
+				fecGroupSize = int(metaInfo.FECGroup)
+			}
+		} else {
+			dataBlocks[block.Index] = block
+			if len(data) > maxBlockSize {
+				maxBlockSize = len(data)
+			}
+		}
+
 		blocks = append(blocks, block)
 
 		if totalBlocks == 0 {
 			totalBlocks = block.TotalBlocks
-			expectedFileSize = block.FileSize
 			expectedFileName = block.FileName
 		}
 
@@ -548,23 +602,35 @@ func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error
 		return nil, "", fmt.Errorf("no blocks successfully decoded")
 	}
 
-	if int(expectedFileSize) != totalBlocks*len(blocks[0].Data) && expectedFileSize > 0 {
-		logger(fmt.Sprintf("Note: file size mismatch (expected %d bytes, got %d bytes)", expectedFileSize, totalBlocks*len(blocks[0].Data)))
+	dataBlocksCount := totalBlocks - fecBlocksCount
+
+	missingCount := 0
+	for i := 0; i < dataBlocksCount; i++ {
+		if _, ok := dataBlocks[i]; !ok {
+			missingCount++
+		}
 	}
 
-	result := make([]byte, 0, totalBlocks*len(blocks[0].Data))
-	for i := 0; i < totalBlocks; i++ {
-		found := false
-		for _, block := range blocks {
-			if block.Index == i {
-				result = append(result, block.Data...)
-				found = true
-				break
-			}
+	if missingCount > 0 && len(fecBlocks) > 0 {
+		logger(fmt.Sprintf("Missing %d data block(s), attempting FEC recovery...", missingCount))
+
+		recovered := recoverWithFEC(dataBlocks, fecBlocks, fecGroupSize, maxBlockSize)
+		logger(fmt.Sprintf("Recovered %d block(s) using FEC", recovered))
+	}
+
+	result := make([]byte, 0, dataBlocksCount*maxBlockSize)
+	missingBlocks := 0
+	for i := 0; i < dataBlocksCount; i++ {
+		block, ok := dataBlocks[i]
+		if ok {
+			result = append(result, block.Data...)
+		} else {
+			missingBlocks++
 		}
-		if !found {
-			logger(fmt.Sprintf("Warning: missing block %d", i))
-		}
+	}
+
+	if missingBlocks > 0 {
+		logger(fmt.Sprintf("Warning: %d block(s) still missing after FEC recovery", missingBlocks))
 	}
 
 	if expectedFileName == "" {
@@ -572,6 +638,61 @@ func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error
 	}
 
 	return result, expectedFileName, nil
+}
+
+func recoverWithFEC(dataBlocks map[int]*FrameBlock, fecBlocks []*FrameBlock, groupSize, maxBlockSize int) int {
+	if len(fecBlocks) == 0 || groupSize == 0 {
+		return 0
+	}
+
+	recovered := 0
+	numGroups := (len(dataBlocks) + groupSize - 1) / groupSize
+
+	for g := 0; g < numGroups && g < len(fecBlocks); g++ {
+		fec := fecBlocks[g]
+		if fec == nil || len(fec.Data) == 0 {
+			continue
+		}
+
+		start := g * groupSize
+		end := start + groupSize
+
+		missing := -1
+		for i := start; i < end && i < len(dataBlocks)+recovered; i++ {
+			if _, ok := dataBlocks[i]; !ok {
+				if missing == -1 {
+					missing = i
+				} else {
+					break
+				}
+			}
+		}
+
+		if missing == -1 {
+			continue
+		}
+
+		recoveredData := make([]byte, len(fec.Data))
+		copy(recoveredData, fec.Data)
+
+		for i := start; i < end; i++ {
+			if block, ok := dataBlocks[i]; ok {
+				for j := 0; j < len(recoveredData) && j < len(block.Data); j++ {
+					recoveredData[j] ^= block.Data[j]
+				}
+			}
+		}
+
+		dataBlocks[missing] = &FrameBlock{
+			Index:       missing,
+			Data:        recoveredData,
+			TotalBlocks: len(dataBlocks) + len(fecBlocks),
+			IsFEC:       false,
+		}
+		recovered++
+	}
+
+	return recovered
 }
 
 func (d *Decoder) DetectFrameInfoFromFile(path string) (format.FrameInfo, error) {
