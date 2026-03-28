@@ -171,28 +171,28 @@ func interactiveMode() {
 
 	fmt.Printf("Found %d frame(s)\n", len(framePaths))
 
-	for _, framePath := range framePaths {
-		fmt.Printf("Decoding: %s\n", filepath.Base(framePath))
-
-		data, filename, err := codec.DecodeFile(framePath, nil)
-		if err != nil {
-			fmt.Printf("Error decoding %s: %v\n", filepath.Base(framePath), err)
-			continue
-		}
-
-		outputPath := output
-		if output == "decoded" {
-			os.MkdirAll("decoded", 0755)
-			outputPath = filepath.Join("decoded", filename)
-		}
-
-		if err := codec.SaveFile(data, outputPath); err != nil {
-			fmt.Printf("Error saving %s: %v\n", outputPath, err)
-			continue
-		}
-
-		fmt.Printf("Saved: %s (%d bytes)\n", outputPath, len(data))
+	logger := func(msg string) {
+		fmt.Println("[LOG]", msg)
 	}
+
+	data, filename, err := codec.DecodeDirectory(input, logger)
+	if err != nil {
+		fmt.Printf("Error decoding directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	outputPath := output
+	if output == "decoded" {
+		os.MkdirAll("decoded", 0755)
+		outputPath = filepath.Join("decoded", filename)
+	}
+
+	if err := codec.SaveFile(data, outputPath); err != nil {
+		fmt.Printf("Error saving %s: %v\n", outputPath, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Saved: %s (%d bytes)\n", outputPath, len(data))
 }
 
 func truncate(s string, max int) string {
@@ -273,36 +273,36 @@ func main() {
 		if len(framePaths) > 0 {
 			fmt.Printf("Found %d frame(s)\n", len(framePaths))
 
-			for _, framePath := range framePaths {
-				fmt.Printf("Decoding: %s\n", filepath.Base(framePath))
-
-				data, filename, err := codec.DecodeFile(framePath, func(msg string) {
-					fmt.Println("[LOG]", msg)
-				})
-				if err != nil {
-					fmt.Printf("Error decoding %s: %v\n", filepath.Base(framePath), err)
-					continue
-				}
-
-				outputPath := *output
-				if info, err := os.Stat(*output); err == nil && info.IsDir() {
-					outputPath = filepath.Join(*output, filename)
-				}
-
-				if err := codec.SaveFile(data, outputPath); err != nil {
-					fmt.Printf("Error saving %s: %v\n", outputPath, err)
-					continue
-				}
-
-				fmt.Printf("Saved: %s (%d bytes)\n", outputPath, len(data))
+			logger := func(msg string) {
+				fmt.Println("[LOG]", msg)
 			}
+
+			data, filename, err := codec.DecodeDirectory(*input, logger)
+			if err != nil {
+				fmt.Printf("Error decoding directory: %v\n", err)
+				os.Exit(1)
+			}
+
+			outputPath := *output
+			if info, err := os.Stat(*output); err == nil && info.IsDir() {
+				outputPath = filepath.Join(*output, filename)
+			}
+
+			if err := codec.SaveFile(data, outputPath); err != nil {
+				fmt.Printf("Error saving %s: %v\n", outputPath, err)
+				os.Exit(1)
+			}
+
+			fmt.Printf("Saved: %s (%d bytes)\n", outputPath, len(data))
 			return
 		}
 	}
 
 	fmt.Printf("Decoding: %s\n", filepath.Base(*input))
 
-	data, filename, err := codec.DecodeFile(*input, nil)
+	data, filename, err := codec.DecodeFile(*input, func(msg string) {
+		fmt.Println("[LOG]", msg)
+	})
 	if err != nil {
 		fmt.Printf("Error decoding: %v\n", err)
 		os.Exit(1)

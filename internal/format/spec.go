@@ -20,21 +20,25 @@ const (
 	MetaCRC32       = 4
 	MetaDataRows    = 2
 	MetaDataCols    = 2
+	MetaTotalBlocks = 2
+	MetaBlockIndex  = 2
 	MetaSeparator   = 1
 	MetaFileNameMax = 32
 
-	MetaMinBytes   = MetaBitDepth + MetaFileSize + MetaFileNameLen + MetaCRC32 + MetaDataRows + MetaDataCols + MetaSeparator
+	MetaMinBytes   = MetaBitDepth + MetaFileSize + MetaFileNameLen + MetaCRC32 + MetaDataRows + MetaDataCols + MetaTotalBlocks + MetaBlockIndex + MetaSeparator
 	MetaFixedBytes = MetaMinBytes + MetaFileNameMax
 	MetaFixedBits  = MetaFixedBytes * 8
 )
 
 type MetaInfo struct {
-	BitDepth uint8
-	FileSize uint32
-	FileName string
-	CRC32    uint32
-	DataRows uint16
-	DataCols uint16
+	BitDepth    uint8
+	FileSize    uint32
+	FileName    string
+	CRC32       uint32
+	DataRows    uint16
+	DataCols    uint16
+	TotalBlocks uint16
+	BlockIndex  uint16
 }
 
 func (m *MetaInfo) Serialize() []byte {
@@ -59,6 +63,8 @@ func (m *MetaInfo) Serialize() []byte {
 	data = binary.LittleEndian.AppendUint32(data, m.CRC32)
 	data = binary.LittleEndian.AppendUint16(data, m.DataRows)
 	data = binary.LittleEndian.AppendUint16(data, m.DataCols)
+	data = binary.LittleEndian.AppendUint16(data, m.TotalBlocks)
+	data = binary.LittleEndian.AppendUint16(data, m.BlockIndex)
 	data = append(data, SeparatorPattern)
 
 	return data
@@ -96,6 +102,12 @@ func ParseMeta(data []byte) (*MetaInfo, error) {
 
 	m.DataCols = binary.LittleEndian.Uint16(data[offset : offset+MetaDataCols])
 	offset += MetaDataCols
+
+	m.TotalBlocks = binary.LittleEndian.Uint16(data[offset : offset+MetaTotalBlocks])
+	offset += MetaTotalBlocks
+
+	m.BlockIndex = binary.LittleEndian.Uint16(data[offset : offset+MetaBlockIndex])
+	offset += MetaBlockIndex
 
 	if data[offset] != SeparatorPattern {
 		return nil, ErrInvalidHeader

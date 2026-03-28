@@ -63,20 +63,28 @@ func (e *Encoder) FrameInfo() format.FrameInfo {
 	return format.CalcFrameInfo(e.width, e.height, e.pixelSize)
 }
 
-func (e *Encoder) EncodeFile(data []byte, filename string) (*image.Gray, error) {
+func (e *Encoder) MaxBytesPerFrame() int {
 	fi := e.FrameInfo()
-	e.log("EncodeFile: width=%d, height=%d, pixelSize=%d, bitDepth=%d", e.width, e.height, e.pixelSize, e.bitDepth)
+	return (fi.DataRows * fi.DataCols * e.bitDepth) / 8
+}
+
+func (e *Encoder) EncodeFile(data []byte, filename string, totalBlocks, blockIndex uint16) (*image.Gray, error) {
+	fi := e.FrameInfo()
+	e.log("EncodeFile: width=%d, height=%d, pixelSize=%d, bitDepth=%d, block=%d/%d",
+		e.width, e.height, e.pixelSize, e.bitDepth, blockIndex, totalBlocks)
 
 	if fi.DataCols < format.TemplateSize*2 || fi.DataRows < format.TemplateSize*2 {
 		return nil, fmt.Errorf("%w: image too small", format.ErrImageTooSmall)
 	}
 
 	metaInfo := &format.MetaInfo{
-		BitDepth: uint8(e.bitDepth),
-		FileSize: uint32(len(data)),
-		FileName: filename,
-		DataRows: uint16(fi.DataRows - format.TemplateSize*2),
-		DataCols: uint16(fi.DataCols),
+		BitDepth:    uint8(e.bitDepth),
+		FileSize:    uint32(len(data)),
+		FileName:    filename,
+		DataRows:    uint16(fi.DataRows),
+		DataCols:    uint16(fi.DataCols),
+		TotalBlocks: totalBlocks,
+		BlockIndex:  blockIndex,
 	}
 	metaInfo.SetCRC(data)
 	metaData := metaInfo.Serialize()
@@ -221,12 +229,16 @@ func (e *Encoder) SaveImage(img *image.Gray, path string) error {
 }
 
 func EncodeFile(inputPath, outputPath string, width, height, pixelSize, bitDepth int, logger func(string)) error {
+	return EncodeFileMulti(inputPath, outputPath, width, height, pixelSize, bitDepth, logger)
+}
+
+func EncodeFileMulti(inputPath, outputPathPrefix string, width, height, pixelSize, bitDepth int, logger func(string)) error {
 	if logger == nil {
 		logger = func(string) {}
 	}
 
 	logger(fmt.Sprintf("Encoding: input=%s, output=%s, size=%dx%d, pixelSize=%d, bitDepth=%d",
-		inputPath, outputPath, width, height, pixelSize, bitDepth))
+		inputPath, outputPathPrefix, width, height, pixelSize, bitDepth))
 
 	file, err := os.Open(inputPath)
 	if err != nil {
@@ -242,16 +254,33 @@ func EncodeFile(inputPath, outputPath string, width, height, pixelSize, bitDepth
 	logger(fmt.Sprintf("File size: %d bytes", len(data)))
 
 	encoder := NewEncoder(width, height, WithPixelSize(pixelSize), WithBitDepth(bitDepth), WithLogger(logger))
-	img, err := encoder.EncodeFile(data, filepath.Base(inputPath))
-	if err != nil {
-		return fmt.Errorf("failed to encode: %w", err)
+	maxCapacity := encoder.MaxBytesPerFrame()
+	totalBlocks := uint16((len(data) + maxCapacity - 1) / maxCapacity)
+
+	logger(fmt.Sprintf("Splitting into %d block(s) (max %d bytes each)", totalBlocks, maxCapacity))
+
+	filename := filepath.Base(inputPath)
+
+	for blockIndex := uint16(0); blockIndex < totalBlocks; blockIndex++ {
+		start := int(blockIndex) * maxCapacity
+		end := start + maxCapacity
+		if end > len(data) {
+			end = len(data)
+		}
+
+		chunk := data[start:end]
+		img, err := encoder.EncodeFile(chunk, filename, totalBlocks, blockIndex)
+		if err != nil {
+			return fmt.Errorf("failed to encode block %d: %w", blockIndex, err)
+		}
+
+		outputPath := fmt.Sprintf("%s_%03d.png", outputPathPrefix, blockIndex)
+		if err := encoder.SaveImage(img, outputPath); err != nil {
+			return fmt.Errorf("failed to save block %d: %w", blockIndex, err)
+		}
+		logger(fmt.Sprintf("Saved block %d/%d: %s (%d bytes)", blockIndex+1, totalBlocks, outputPath, len(chunk)))
 	}
 
-	if err := encoder.SaveImage(img, outputPath); err != nil {
-		return fmt.Errorf("failed to save image: %w", err)
-	}
-
-	logger(fmt.Sprintf("Encoded successfully: %s", outputPath))
 	return nil
 }
 
@@ -266,12 +295,10 @@ func EncodeFileToDir(inputPath, outputDir string, width, height, pixelSize, bitD
 
 	filename := filepath.Base(inputPath)
 	if ext := filepath.Ext(filename); ext != "" {
-		filename = filename[:len(ext)] + ".png"
-	} else {
-		filename = filename + ".png"
+		filename = filename[:len(ext)]
 	}
 
-	outputPath := filepath.Join(outputDir, filename)
+	outputPathPrefix := filepath.Join(outputDir, filename)
 
-	return EncodeFile(inputPath, outputPath, width, height, pixelSize, bitDepth, logger)
+	return EncodeFileMulti(inputPath, outputPathPrefix, width, height, pixelSize, bitDepth, logger)
 }

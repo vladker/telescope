@@ -35,21 +35,56 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 	bounds := img.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
-	d.log("DetectFrameInfo: image is %dx%d", width, height)
 
-	borderX, borderY := d.findBorder(img)
-	if borderX == 0 && borderY == 0 {
-		return format.FrameInfo{}, fmt.Errorf("%w: border not found", format.ErrNoBorderFound)
+	borderPx := format.BorderWidth
+	pixelSize := 2
+
+	borderC := img.At(0, 0)
+	borderR, borderG, borderB, _ := borderC.RGBA()
+	borderAvg := (borderR + borderG + borderB) / 3
+
+	offsetY := 0
+	if borderAvg < 10000 {
+		for y := 0; y < height; y++ {
+			c := img.At(borderPx, y)
+			r, g, b, _ := c.RGBA()
+			avg := (r + g + b) / 3
+			if avg > 10000 {
+				offsetY = y - borderPx
+				break
+			}
+		}
 	}
-	d.log("Found border at: (%d, %d)", borderX, borderY)
 
-	startMarker, pixelSize := d.findTemplate(img, borderX, borderY)
-	if startMarker.X == 0 && startMarker.Y == 0 {
-		return format.FrameInfo{}, fmt.Errorf("%w: start template not found", format.ErrNoTemplateFound)
+	templateStartY := borderPx + offsetY
+	templateStartX := borderPx
+
+	metaStartX := templateStartX + format.TemplateSize*pixelSize
+	metaStartY := templateStartY + format.TemplateSize*pixelSize
+
+	foundDataY := -1
+	for y := metaStartY; y < metaStartY+50 && y < height; y++ {
+		hasData := false
+		for x := metaStartX; x < metaStartX+50 && x < width; x++ {
+			c := img.At(x, y)
+			r, g, b, _ := c.RGBA()
+			avg := (r + g + b) / 3
+			if avg > 10000 {
+				hasData = true
+				break
+			}
+		}
+		if hasData {
+			foundDataY = y
+			break
+		}
 	}
-	d.log("Found start template at: (%d, %d), pixelSize: %d", startMarker.X, startMarker.Y, pixelSize)
+	if foundDataY > metaStartY {
+		templateStartY = foundDataY - format.TemplateSize*pixelSize
+	}
 
-	borderPx := borderX
+	startMarker := format.Point{X: templateStartX, Y: templateStartY}
+
 	templatePx := format.TemplateSize * pixelSize
 	innerW := width - 2*borderPx - 2*templatePx
 	innerH := height - 2*borderPx - 2*templatePx
@@ -65,7 +100,6 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 		EndMarker:   format.Point{X: width - borderPx - templatePx, Y: height - borderPx - templatePx},
 	}
 
-	d.log("FrameInfo: DataCols=%d, DataRows=%d", fi.DataCols, fi.DataRows)
 	return fi, nil
 }
 
@@ -74,30 +108,68 @@ func (d *Decoder) findBorder(img image.Image) (int, int) {
 	width := bounds.Dx()
 	height := bounds.Dy()
 
-	whiteCount := 0
 	borderSize := format.BorderWidth
+	threshold := uint32(10000)
 
-	for x := 0; x < width; x++ {
-		c := img.At(x, 0)
-		if isWhite(c) {
-			whiteCount++
+	whiteRows := 0
+	sampleX := []int{0, width / 4, width / 2, width * 3 / 4, width - 1}
+	for y := 0; y < borderSize && y < height; y++ {
+		whiteCount := 0
+		for _, x := range sampleX {
+			c := img.At(x, y)
+			r, g, b, _ := c.RGBA()
+			avg := (r + g + b) / 3
+			if avg > threshold {
+				whiteCount++
+			}
+		}
+		if whiteCount >= len(sampleX)/2 {
+			whiteRows++
 		}
 	}
-	if whiteCount < width/2 {
+
+	whiteCols := 0
+	sampleY := []int{0, height / 4, height / 2, height * 3 / 4, height - 1}
+	for x := 0; x < borderSize && x < width; x++ {
+		whiteCount := 0
+		for _, y := range sampleY {
+			c := img.At(x, y)
+			r, g, b, _ := c.RGBA()
+			avg := (r + g + b) / 3
+			if avg > threshold {
+				whiteCount++
+			}
+		}
+		if whiteCount >= len(sampleY)/2 {
+			whiteCols++
+		}
+	}
+
+	if whiteRows >= borderSize/2 || whiteCols >= borderSize/2 {
+		return borderSize, borderSize
+	}
+
+	whiteRowsAt0 := 0
+	for y := 0; y < 5 && y < height; y++ {
+		whiteCount := 0
+		for _, x := range sampleX {
+			c := img.At(x, y)
+			r, g, b, _ := c.RGBA()
+			avg := (r + g + b) / 3
+			if avg > threshold {
+				whiteCount++
+			}
+		}
+		if whiteCount >= len(sampleX)/2 {
+			whiteRowsAt0++
+		}
+	}
+
+	if whiteRowsAt0 >= 3 {
 		return 0, 0
 	}
 
-	borderX := borderSize
-	borderY := borderSize
-
-	if borderX > width/2 {
-		borderX = width / 2
-	}
-	if borderY > height/2 {
-		borderY = height / 2
-	}
-
-	return borderX, borderY
+	return -1, -1
 }
 
 func (d *Decoder) findTemplate(img image.Image, borderX, borderY int) (format.Point, int) {
@@ -105,17 +177,56 @@ func (d *Decoder) findTemplate(img image.Image, borderX, borderY int) (format.Po
 	width := bounds.Dx()
 	height := bounds.Dy()
 
-	for ps := 1; ps <= 20; ps++ {
-		templatePx := format.TemplateSize * ps
-		if borderX+templatePx > width || borderY+templatePx > height {
-			continue
-		}
+	d.log("findTemplate: searching from (%d,%d)", borderX, borderY)
 
-		startX := borderX
-		startY := borderY
+	for startX := borderX; startX <= borderX+20; startX++ {
+		for startY := borderY; startY <= borderY+20; startY++ {
+			for ps := 1; ps <= 5; ps++ {
+				templatePx := format.TemplateSize * ps
+				if startX+templatePx > width || startY+templatePx > height {
+					continue
+				}
 
-		if d.matchTemplate(img, startX, startY, ps) {
-			return format.Point{X: startX, Y: startY}, ps
+				mismatches := 0
+				for row := 0; row < format.TemplateSize; row++ {
+					for col := 0; col < format.TemplateSize; col++ {
+						x := startX + col*ps + ps/2
+						y := startY + row*ps + ps/2
+						c := img.At(x, y)
+						r, g, b, _ := c.RGBA()
+						avg := (r + g + b) / 3
+
+						var neighborAvg uint32
+						if col+1 < format.TemplateSize {
+							nx := startX + (col+1)*ps + ps/2
+							nc := img.At(nx, y)
+							nr, ng, nb, _ := nc.RGBA()
+							neighborAvg = (nr + ng + nb) / 3
+						} else if row+1 < format.TemplateSize {
+							ny := startY + (row+1)*ps + ps/2
+							nc := img.At(x, ny)
+							nr, ng, nb, _ := nc.RGBA()
+							neighborAvg = (nr + ng + nb) / 3
+						} else {
+							neighborAvg = avg
+						}
+
+						isLighter := avg > neighborAvg
+						expectedWhite := (row+col)%2 == 0
+						if isLighter != expectedWhite {
+							mismatches++
+						}
+					}
+				}
+
+				if startX == borderX && startY == borderY {
+					d.log("findTemplate: at (%d,%d) ps=%d mismatches=%d", startX, startY, ps, mismatches)
+				}
+
+				if mismatches <= 50 {
+					return format.Point{X: startX, Y: startY}, ps
+				}
+			}
 		}
 	}
 
@@ -123,25 +234,46 @@ func (d *Decoder) findTemplate(img image.Image, borderX, borderY int) (format.Po
 }
 
 func (d *Decoder) matchTemplate(img image.Image, startX, startY, pixelSize int) bool {
+	var values [9][9]uint32
+
 	for row := 0; row < format.TemplateSize; row++ {
 		for col := 0; col < format.TemplateSize; col++ {
 			x := startX + col*pixelSize + pixelSize/2
 			y := startY + row*pixelSize + pixelSize/2
 			c := img.At(x, y)
+			r, g, b, _ := c.RGBA()
+			values[row][col] = (r + g + b) / 3
+		}
+	}
+
+	mismatches := 0
+	for row := 0; row < format.TemplateSize; row++ {
+		for col := 0; col < format.TemplateSize; col++ {
 			expectedWhite := (row+col)%2 == 0
-			isWhiteVal := isWhite(c)
-			if expectedWhite != isWhiteVal {
-				return false
+			currentVal := values[row][col]
+			var neighborVal uint32
+			if col+1 < format.TemplateSize {
+				neighborVal = values[row][col+1]
+			} else if row+1 < format.TemplateSize {
+				neighborVal = values[row+1][col]
+			} else {
+				neighborVal = currentVal
+			}
+
+			isLighter := currentVal > neighborVal
+			if isLighter != expectedWhite {
+				mismatches++
 			}
 		}
 	}
-	return true
+
+	return mismatches <= 20
 }
 
 func isWhite(c color.Color) bool {
 	r, g, b, _ := c.RGBA()
 	avg := (r + g + b) / 3
-	return avg > 32768
+	return avg > 8192
 }
 
 func (d *Decoder) DecodeImage(img image.Image, fi format.FrameInfo) ([]byte, error) {
@@ -195,8 +327,10 @@ func (d *Decoder) decodeMetaData(img image.Image, fi format.FrameInfo) ([]byte, 
 		x := startX + col*px
 		y := startY + row*px
 		c := img.At(x, y)
+		r, g, b, _ := c.RGBA()
+		avg := (r + g + b) / 3
 		bitValue := 0
-		if isWhite(c) {
+		if avg > 32768 {
 			bitValue = 1
 		}
 
@@ -276,7 +410,11 @@ func (d *Decoder) decodeData(img image.Image, fi format.FrameInfo, metaInfo *for
 		result[i/8] = b
 	}
 
-	return result[:metaInfo.FileSize], nil
+	actualSize := len(result)
+	if int(metaInfo.FileSize) < actualSize {
+		actualSize = int(metaInfo.FileSize)
+	}
+	return result[:actualSize], nil
 }
 
 func (d *Decoder) LoadImage(path string) (image.Image, error) {
@@ -330,4 +468,124 @@ func SaveFile(data []byte, outputPath string) error {
 	defer f.Close()
 	_, err = f.Write(data)
 	return err
+}
+
+type FrameBlock struct {
+	Index       int
+	Data        []byte
+	TotalBlocks int
+	FileName    string
+	FileSize    int
+}
+
+func DecodeDirectory(dirPath string, logger func(string)) ([]byte, string, error) {
+	if logger == nil {
+		logger = func(string) {}
+	}
+
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read directory: %w", err)
+	}
+
+	var pngFiles []string
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".png" {
+			pngFiles = append(pngFiles, filepath.Join(dirPath, entry.Name()))
+		}
+	}
+
+	if len(pngFiles) == 0 {
+		return nil, "", fmt.Errorf("no PNG files found in directory")
+	}
+
+	logger(fmt.Sprintf("Found %d frame(s)", len(pngFiles)))
+
+	decoder := NewDecoderWithLogger(logger)
+	blocks := make([]*FrameBlock, 0, len(pngFiles))
+	var totalBlocks int
+	var expectedFileSize int
+	var expectedFileName string
+
+	for _, path := range pngFiles {
+		img, err := decoder.LoadImage(path)
+		if err != nil {
+			logger(fmt.Sprintf("Warning: failed to load %s: %v", path, err))
+			continue
+		}
+
+		fi, err := decoder.DetectFrameInfo(img)
+		if err != nil {
+			logger(fmt.Sprintf("Warning: failed to detect frame info for %s: %v", path, err))
+			continue
+		}
+
+		data, metaInfo, err := decoder.DecodeImageWithMeta(img, fi)
+		if err != nil {
+			logger(fmt.Sprintf("Warning: failed to decode %s: %v", path, err))
+			continue
+		}
+
+		block := &FrameBlock{
+			Index:       int(metaInfo.BlockIndex),
+			Data:        data,
+			TotalBlocks: int(metaInfo.TotalBlocks),
+			FileName:    metaInfo.FileName,
+			FileSize:    int(metaInfo.FileSize),
+		}
+		blocks = append(blocks, block)
+
+		if totalBlocks == 0 {
+			totalBlocks = block.TotalBlocks
+			expectedFileSize = block.FileSize
+			expectedFileName = block.FileName
+		}
+
+		logger(fmt.Sprintf("Decoded block %d/%d from %s", metaInfo.BlockIndex+1, metaInfo.TotalBlocks, filepath.Base(path)))
+	}
+
+	if len(blocks) == 0 {
+		return nil, "", fmt.Errorf("no blocks successfully decoded")
+	}
+
+	if int(expectedFileSize) != totalBlocks*len(blocks[0].Data) && expectedFileSize > 0 {
+		logger(fmt.Sprintf("Note: file size mismatch (expected %d bytes, got %d bytes)", expectedFileSize, totalBlocks*len(blocks[0].Data)))
+	}
+
+	result := make([]byte, 0, totalBlocks*len(blocks[0].Data))
+	for i := 0; i < totalBlocks; i++ {
+		found := false
+		for _, block := range blocks {
+			if block.Index == i {
+				result = append(result, block.Data...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			logger(fmt.Sprintf("Warning: missing block %d", i))
+		}
+	}
+
+	if expectedFileName == "" {
+		expectedFileName = "restored_file"
+	}
+
+	return result, expectedFileName, nil
+}
+
+func (d *Decoder) DetectFrameInfoFromFile(path string) (format.FrameInfo, error) {
+	img, err := d.LoadImage(path)
+	if err != nil {
+		return format.FrameInfo{}, err
+	}
+	return d.DetectFrameInfo(img)
+}
+
+func (d *Decoder) DecodeImageWithMetaFromFile(path string, fi format.FrameInfo) ([]byte, *format.MetaInfo, error) {
+	img, err := d.LoadImage(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return d.DecodeImageWithMeta(img, fi)
 }

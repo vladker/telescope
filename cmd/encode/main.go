@@ -16,7 +16,11 @@ var reader = bufio.NewReader(os.Stdin)
 func readLine(prompt string) string {
 	fmt.Print(prompt)
 	input, _ := reader.ReadString('\n')
-	return strings.TrimSpace(input)
+	input = strings.TrimSpace(input)
+	if len(input) >= 2 && input[0] == '"' && input[len(input)-1] == '"' {
+		input = input[1 : len(input)-1]
+	}
+	return input
 }
 
 func readInt(prompt string, defaultVal int) int {
