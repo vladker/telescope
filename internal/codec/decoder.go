@@ -39,15 +39,14 @@ func (d *Decoder) log(format string, args ...interface{}) {
 	}
 }
 
+// DetectFrameInfo определяет параметры кадра с улучшенным поиском бордера
 func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 	bounds := img.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
 	d.log("DetectFrameInfo: image is %dx%d", width, height)
 
-	var detectedPixelSize format.PixelSize
-	var borderOffsetX, borderOffsetY int
-
+	// Пробуем разные размеры пикселей от большего к меньшему
 	for ps := format.Pixel3x3; ps >= format.Pixel1x1; ps-- {
 		borderPx := int(ps) * format.BorderBigPixels
 		d.log("  Testing pixelSize=%d: borderPx=%d", ps, borderPx)
@@ -57,57 +56,73 @@ func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 			continue
 		}
 
-		offset, valid, matchPct := d.findBorderInImage(img, ps)
+		// Ищем бордер с полным перебором возможных смещений
+		offset, valid, matchPct := d.findBorderExhaustive(img, ps)
 		d.log("    Border search: offset=(%d,%d), valid=%v, match=%.1f%%", offset.x, offset.y, valid, matchPct*100)
-		if valid {
-			detectedPixelSize = ps
-			borderOffsetX = offset.x
-			borderOffsetY = offset.y
-			break
+		
+		if valid && matchPct >= 0.8 {
+			d.log("Detected pixelSize: %d, borderOffset: (%d, %d)", ps, offset.x, offset.y)
+			return d.buildFrameInfo(img, width, height, ps, offset.x, offset.y)
 		}
 	}
 
-	if detectedPixelSize == 0 {
-		return format.FrameInfo{}, fmt.Errorf("%w: no valid border found in image", format.ErrNoBorderFound)
+	// Если не нашли с порогом 80%, пробуем найти лучший вариант
+	for ps := format.Pixel3x3; ps >= format.Pixel1x1; ps-- {
+		borderPx := int(ps) * format.BorderBigPixels
+		if borderPx*2 >= width || borderPx*2 >= height {
+			continue
+		}
+
+		offset, valid, matchPct := d.findBorderExhaustive(img, ps)
+		if valid && matchPct >= 0.5 {
+			d.log("Detected pixelSize: %d, borderOffset: (%d, %d) [relaxed]", ps, offset.x, offset.y)
+			return d.buildFrameInfo(img, width, height, ps, offset.x, offset.y)
+		}
 	}
 
-	d.log("Detected pixelSize: %d, borderOffset: (%d, %d)", detectedPixelSize, borderOffsetX, borderOffsetY)
+	return format.FrameInfo{}, fmt.Errorf("%w: no valid border found in image", format.ErrNoBorderFound)
+}
 
-	borderPx := int(detectedPixelSize) * format.BorderBigPixels
+// buildFrameInfo строит FrameInfo после обнаружения бордера
+func (d *Decoder) buildFrameInfo(img image.Image, width, height int, pixelSize format.PixelSize, borderOffsetX, borderOffsetY int) (format.FrameInfo, error) {
+	borderPx := int(pixelSize) * format.BorderBigPixels
 	innerW := width - 2*borderPx
 	innerH := height - 2*borderPx
-	bigPixelsW := innerW / int(detectedPixelSize)
-	bigPixelsH := innerH / int(detectedPixelSize)
+	bigPixelsW := innerW / int(pixelSize)
+	bigPixelsH := innerH / int(pixelSize)
 
 	dataCols := bigPixelsW - 2*format.BorderBigPixels
 	dataRows := bigPixelsH - 2*format.BorderBigPixels
 	dataBigPixels := dataCols * dataRows
 
+	// Определяем режим по мета-данным
 	mode := format.ModeRobustValue
-	metaRow := format.BorderBigPixels
-	metaCol := format.BorderBigPixels
-	sampleGray := d.getBigPixelGrayWithBorder(img, metaCol, metaRow, int(detectedPixelSize), borderPx, borderOffsetX, borderOffsetY)
-	invertedGray := d.getBigPixelGrayWithBorder(img, metaCol, metaRow+1, int(detectedPixelSize), borderPx, borderOffsetX, borderOffsetY)
-	d.log("Meta sample: row=%d, col=%d, gray=%d, invertedGray=%d", metaRow, metaCol, sampleGray, invertedGray)
+	if bigPixelsH > format.BorderBigPixels*2 && bigPixelsW > format.BorderBigPixels*2 {
+		metaRow := format.BorderBigPixels
+		metaCol := format.BorderBigPixels
+		sampleGray := d.getBigPixelGrayWithBorder(img, metaCol, metaRow, int(pixelSize), borderPx, borderOffsetX, borderOffsetY)
+		invertedGray := d.getBigPixelGrayWithBorder(img, metaCol, metaRow+1, int(pixelSize), borderPx, borderOffsetX, borderOffsetY)
+		d.log("Meta sample: row=%d, col=%d, gray=%d, invertedGray=%d", metaRow, metaCol, sampleGray, invertedGray)
 
-	sampleDecoded := d.palette.Decode(sampleGray)
-	isDenseValue := sampleDecoded <= 15
+		sampleDecoded := d.palette.Decode(sampleGray)
+		isDenseValue := sampleDecoded <= 15
 
-	if sampleGray > 200 && invertedGray < 50 {
-		mode = format.ModeRobustValue
-		d.log("Detected mode: robust (inverted row pattern)")
-	} else if isDenseValue && sampleGray%17 == 0 {
-		mode = format.ModeDenseValue
-		d.log("Detected mode: dense (palette value 0x%02X decoded to %d)", sampleGray, sampleDecoded)
-	} else {
-		mode = format.ModeRobustValue
-		d.log("Detected mode: robust (default)")
+		if sampleGray > 200 && invertedGray < 50 {
+			mode = format.ModeRobustValue
+			d.log("Detected mode: robust (inverted row pattern)")
+		} else if isDenseValue && sampleGray%17 == 0 {
+			mode = format.ModeDenseValue
+			d.log("Detected mode: dense (palette value 0x%02X decoded to %d)", sampleGray, sampleDecoded)
+		} else {
+			mode = format.ModeRobustValue
+			d.log("Detected mode: robust (default)")
+		}
 	}
 
 	return format.FrameInfo{
 		Width:         width,
 		Height:        height,
-		PixelSize:     detectedPixelSize,
+		PixelSize:     pixelSize,
 		Mode:          mode,
 		BigPixelsW:    bigPixelsW,
 		BigPixelsH:    bigPixelsH,
@@ -122,33 +137,35 @@ type point struct {
 	x, y int
 }
 
-func (d *Decoder) findBorderInImage(img image.Image, pixelSize format.PixelSize) (point, bool, float64) {
+// findBorderExhaustive ищет бордер полным перебором всех возможных позиций
+func (d *Decoder) findBorderExhaustive(img image.Image, pixelSize format.PixelSize) (point, bool, float64) {
 	bounds := img.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
 	borderPx := int(pixelSize) * format.BorderBigPixels
 
-	step := int(pixelSize) * 2
-	if step < 4 {
-		step = 4
-	}
-
 	bestMatch := 0.0
 	bestOffset := point{0, 0}
-	bestValid := false
 
-	for y := 0; y < height-borderPx*2; y += step {
-		for x := 0; x < width-borderPx*2; x += step {
-			valid, matchPct := d.validateBorderAtOffset(img, x, y, borderPx, int(pixelSize))
-			if valid && matchPct > bestMatch {
+	// Шаг сканирования - меньше для точности
+	step := int(pixelSize)
+	if step < 2 {
+		step = 2
+	}
+
+	// Сканируем все возможные позиции бордера
+	for y := 0; y <= height-borderPx*2; y += step {
+		for x := 0; x <= width-borderPx*2; x += step {
+			_, matchPct := d.validateBorderAtOffset(img, x, y, borderPx, int(pixelSize))
+			if matchPct > bestMatch {
 				bestMatch = matchPct
 				bestOffset = point{x, y}
-				bestValid = true
 			}
 		}
 	}
 
-	return bestOffset, bestValid, bestMatch
+	// Считаем валидным если совпадение >= 70%
+	return bestOffset, bestMatch >= 0.7, bestMatch
 }
 
 func (d *Decoder) validateBorderAtOffset(img image.Image, offsetX, offsetY, borderPx, pixelSize int) (bool, float64) {
@@ -159,8 +176,9 @@ func (d *Decoder) validateBorderAtOffset(img image.Image, offsetX, offsetY, bord
 	matchCount := 0
 	totalChecks := 0
 
-	for i := 0; i < 8*pixelSize; i += pixelSize {
-		for check := 0; check < 4; check++ {
+	// Проверяем верхний бордер (шахматный паттерн)
+	for i := 0; i < 8*pixelSize && i < width-offsetX; i += pixelSize {
+		for check := 0; check < 4 && offsetY+check*pixelSize < height; check++ {
 			x := offsetX + i
 			y := offsetY + check*pixelSize
 			if x >= width || y >= height {
@@ -174,14 +192,16 @@ func (d *Decoder) validateBorderAtOffset(img image.Image, offsetX, offsetY, bord
 			if (bigX+bigY)%2 == 0 {
 				expected = 255
 			}
+			// Учитываем небольшие отклонения из-за JPEG сжатия
 			if int(gray) == expected || (gray > 240 && expected == 255) || (gray < 15 && expected == 0) {
 				matchCount++
 			}
 		}
 	}
 
-	for i := 0; i < 8*pixelSize; i += pixelSize {
-		for check := 0; check < 4; check++ {
+	// Проверяем левый бордер (шахматный паттерн)
+	for i := 0; i < 8*pixelSize && i < height-offsetY; i += pixelSize {
+		for check := 0; check < 4 && offsetX+check*pixelSize < width; check++ {
 			x := offsetX + check*pixelSize
 			y := offsetY + i
 			if x >= width || y >= height {
