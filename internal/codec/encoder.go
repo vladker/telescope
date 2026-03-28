@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"os"
@@ -231,11 +232,13 @@ func (e *Encoder) SaveImageJPEG(img *image.Gray, path string, quality int) error
 	rgba := image.NewRGBA(img.Bounds())
 	for y := 0; y < img.Bounds().Dy(); y++ {
 		for x := 0; x < img.Bounds().Dx(); x++ {
-			rgba.Set(x, y, img.GrayAt(x, y))
+			gray := img.GrayAt(x, y).Y
+			rgba.Set(x, y, color.Gray{Y: gray})
 		}
 	}
 
-	return nil
+	// Use standard library's jpeg encoder
+	return jpeg.Encode(f, rgba, &jpeg.Options{Quality: quality})
 }
 
 type EncodeLogger func(string)
