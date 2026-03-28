@@ -1,152 +1,216 @@
-# Telescope — File Encoding via Images
+# Telescope — Technical Specification
 
 ## Overview
 
-Telescope encodes files into sequences of images (or video frames) and decodes them back. Designed for transferring files through VDI/screen recording when direct network access is unavailable.
+Telescope encodes binary files into sequences of PNG/JPEG images for transfer via screen recording or VDI. Each image contains:
+- A calibration border for auto-detection
+- A 64-byte metadata header
+- Encoded file data
 
-## Modes
+## Constants
 
-### Dense Mode (4-bit)
-- **Bits per pixel**: 4 (16 grayscale levels)
-- **Redundancy**: CRC32 per frame only
-- **Use case**: Maximum data density, clean recording conditions
+```go
+const (
+    Signature       = "TSCOPE01"  // 8-byte magic signature
+    HeaderSize      = 64          // Fixed header size
+    Version         = 1           // Protocol version
+    BorderBigPixels = 4           // Border width in big pixels
+    CalibrationBits = 0xFF        // White calibration value
+)
+```
 
-### Robust Mode (8-bit with duplication)
-- **Bits per pixel**: 8 (256 grayscale levels)
-- **Redundancy**: 
-  - CRC32 per frame
-  - Row duplication with inversion
-- **Use case**: Better tolerance to compression artifacts, noise
+## Image Layout
 
-## Image Format Specification
-
-### Layout (top to bottom)
 ```
 ┌──────────────────────────────────────┐
-│ Calibration border (8 big pixels)    │ ← Always 8×8 big-pixels, chessboard
+│ ▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░ │  BorderBigPixels = 4
+│ ░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░ │
+│ ░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░ │
+│ ░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░░▓▓░ │
 ├──────────────────────────────────────┤
-│ Meta header (8 big pixels × 8 rows)  │ ← 64 bytes fixed format
+│ [Meta Header: 64 bytes]              │  Rows 4-5 in inner area
 ├──────────────────────────────────────┤
-│ Data area                            │ ← Variable, depends on image size
+│ [Encoded Data...]                    │  Remaining rows
 └──────────────────────────────────────┘
 ```
 
-### Calibration Border
-- 8 "big pixels" wide on each side
-- Chessboard pattern: alternating 0x00 and 0xFF for big pixels
-- **Purpose**: Auto-detect big-pixel size (1×1, 2×2, 3×3)
+## Calibration Border
 
-### Meta Header (64 bytes, fixed)
-```
-Offset  Size  Field
-0       8     Signature: "TSCOPE01"
-8       4     Version (uint32, LE) = 1
-12      4     Total file size (uint32, LE)
-16      4     Frame number (uint32, LE), 0-indexed
-20      4     Total frames (uint32, LE)
-24      4     Data size in this frame (uint32, LE)
-28      4     CRC32 of frame data (IEEE 802.3)
-32      32    Reserved (zeros)
-```
+- **Width**: `BorderBigPixels` big pixels on each side
+- **Pattern**: Chessboard (alternating 0xFF and 0x00 per big pixel)
+- **Purpose**: Auto-detect pixel size and validate frame
 
-### Big Pixel Structure
-- **1×1**: 1 image pixel = 1 data pixel
-- **2×2**: 2×2 image pixels = 1 data pixel
-- **3×3**: 3×3 image pixels = 1 data pixel
+### Border Detection Algorithm
 
-Big pixel value encoding:
-- **Dense (4-bit)**: Lower 4 bits of 8-bit grayscale
-  - Valid values: 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
-- **Robust (8-bit)**: Full 8-bit grayscale
+1. Iterate through possible pixel sizes (3, 2, 1) in descending order
+2. Calculate expected border width in pixels: `borderPx = pixelSize * BorderBigPixels`
+3. Check inner dimensions: must be ≥ 16 big pixels each way
+4. Validate chessboard pattern at 4 corners and edges
+5. Require ≥70% pattern match
 
-### Robust Mode: Row Duplication
-Each row is encoded twice:
-1. Original row
-2. Inverted row (255 - value)
+## Pixel Size
 
-This allows detection and correction of single-row errors.
+| Size | Description | Formula |
+|------|-------------|---------|
+| 1×1 | Full resolution | 1 image pixel = 1 data byte |
+| 2×2 | Half resolution | 2×2 image pixels = 1 data byte |
+| 3×3 | Third resolution | 3×3 image pixels = 1 data byte |
 
-## Encoder CLI
+## Big Pixel Structure
 
-```bash
-telescope encode [flags]
+Big pixels are averaged for value extraction:
+```go
+func getBigPixelGray(img, bigX, bigY, size, borderPx) uint8 {
+    // Average all pixels in the big pixel region
+    sum := 0
+    for y := borderPx+bigY*size; y < borderPx+(bigY+1)*size; y++ {
+        for x := borderPx+bigX*size; x < borderPx+(bigX+1)*size; x++ {
+            sum += pixelGray(x, y)
+        }
+    }
+    return uint8(sum / (size * size))
+}
 ```
 
-### Flags
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-i, --input` | required | Input file path |
-| `-o, --output` | required | Output directory for frames |
-| `-W, --width` | 1920 | Image width in pixels |
-| `-H, --height` | 1080 | Image height in pixels |
-| `-p, --pixel` | 2 | Big pixel size (1, 2, or 3) |
-| `-m, --mode` | robust | Encoding mode: dense or robust |
-| `-f, --format` | png | Output format: png or jpeg |
-| `-q, --quality` | 95 | JPEG quality (1-100) |
+## Modes
 
-### Output
-- `frame_0000.png`, `frame_0001.png`, ...
-- `manifest.json` — metadata for decoder
+### Robust Mode (8-bit)
 
-## Decoder CLI
+- **Data encoding**: Full 8-bit grayscale (0-255)
+- **CRC**: IEEE 802.3 CRC32 per frame
+- **Redundancy**: None (uses all rows for data)
 
-```bash
-telescope decode [flags]
+### Dense Mode (4-bit)
+
+- **Data encoding**: 4-bit nibbles mapped to palette
+- **Palette**: `value = nibble * 17` (0, 17, 34, 51, ..., 255)
+- **Encoding**: Two pixels per byte (high nibble, low nibble)
+- **CRC**: IEEE 802.3 CRC32 per frame
+
+## Metadata Header (64 bytes)
+
+```
+Offset  Size  Type     Field
+─────────────────────────────────
+0       8     [8]byte Signature ("TSCOPE01")
+8       4     uint32   Version (= 1)
+12      4     uint32   FileSize (total original file size)
+16      4     uint32   FrameNum (0-indexed)
+20      4     uint32   TotalFrames
+24      4     uint32   DataSize (bytes in this frame)
+28      4     uint32   CRC32 (IEEE, of frame data only)
+32      32    [32]byte Reserved
 ```
 
-### Flags
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-i, --input` | required | Input: directory with images or video file |
-| `-o, --output` | required | Output file path |
-| `--video` | false | Input is video file (requires ffmpeg) |
-| `--fps` | 1 | FPS for video frame extraction |
-| `--unique` | true | Extract only unique frames (hash-based) |
-| `--force` | false | Skip CRC validation |
+All multi-byte values are little-endian.
 
-### Workflow for Video
-1. User records screen with OBS (lossless codec preferred)
-2. Decoder uses ffmpeg to extract frames
-3. Frames are hashed to find unique ones
-4. Each frame is scanned for calibration border
-5. Data is extracted and reassembled
-6. File is validated and saved
+## FrameInfo Calculation
 
-## Detection Algorithm
+```go
+func CalcFrameInfo(width, height int, pixelSize PixelSize, mode Mode) FrameInfo {
+    borderPx := pixelSize * BorderBigPixels
+    innerW := width - 2*borderPx
+    innerH := height - 2*borderPx
 
-1. **Find border**: Scan for chessboard pattern in border region
-2. **Determine pixel size**: Count alternating pixels to calculate big-pixel size
-3. **Extract meta**: Read 64-byte header
-4. **Validate**: Check signature, CRC, frame sequence
-5. **Reassemble**: Sort frames, concat data, restore file
+    bigPixelsW := innerW / pixelSize
+    bigPixelsH := innerH / pixelSize
 
-## File Format Support
+    // Data area: exclude border on all sides
+    dataCols := bigPixelsW - 2*BorderBigPixels
+    dataRows := bigPixelsH - 2*BorderBigPixels
+    dataBigPixels := dataCols * dataRows
 
-- Any binary file
-- Maximum file size: ~4GB (limited by uint32 addressing)
-- Large files are split across multiple frames
-
-## Technical Details
-
-- Language: Go 1.21+
-- Dependencies: 
-  - `image` (stdlib) — image processing
-  - `image/png`, `image/jpeg` (stdlib) — format encoding
-  - `github.com/veandco/go-sdl2/sdl` — optional preview (future)
-- No external dependencies for core functionality
-
-## Data Flow
-
-### Encoding
-```
-Input File → Chunking → Per-frame:
-  [Calibration][Meta Header][Data + Padding]
-  → Render to Image → Save
+    return FrameInfo{
+        Width:         width,
+        Height:        height,
+        PixelSize:     pixelSize,
+        Mode:          mode,
+        BigPixelsW:    bigPixelsW,
+        BigPixelsH:    bigPixelsH,
+        BorderW:       borderPx,
+        DataBigPixels: dataBigPixels,
+    }
+}
 ```
 
-### Decoding
+## Encoding Process
+
+1. Read file into buffer
+2. Calculate `dataPerFrame` from FrameInfo
+3. For each frame:
+   - Create image with specified dimensions
+   - Draw calibration border
+   - Draw metadata header in rows 4-5 of inner area
+   - Draw data starting from row 8 of inner area
+   - Set CRC32 of data in header
+4. Save as PNG or JPEG
+
+## Decoding Process
+
+1. Load image file(s)
+2. Detect pixel size from border
+3. Read metadata header (rows 4-5)
+4. Parse header, validate signature and CRC
+5. Read frame data based on `DataSize` field
+6. Concatenate frames in order
+7. Write to output file
+
+## Data Capacity Examples
+
+| Resolution | Pixel | Mode | DataBigPixels | Bytes/Frame |
+|------------|-------|------|--------------|-------------|
+| 100×100 | 2×2 | Robust | 1156 | 1156 |
+| 200×200 | 2×2 | Robust | 4624 | 4624 |
+| 1920×1080 | 2×2 | Robust | 494,656 | 494 KB |
+| 3840×2160 | 2×2 | Robust | ~2 MB | ~2 MB |
+
+## Mode Detection
+
+Decoder auto-detects mode from meta header sample:
+1. Read pixel at (row=4, col=4)
+2. Check if value suggests Dense palette (multiple of 17)
+3. Default to Robust mode
+
+## Error Handling
+
+- **No border found**: Return `ErrNoBorderFound`
+- **Invalid signature**: Return `ErrInvalidSignature`
+- **Invalid version**: Return `ErrInvalidVersion`
+- **Invalid header size**: Return `ErrInvalidHeader`
+- **CRC mismatch**: Return `ErrCRCFailed` (can be skipped with `-force`)
+
+## File Structure
+
+### Encoder Output
 ```
-Images/Frames → Border Detection → Pixel Size Detection
-  → Meta Parsing → CRC Validation → Data Extraction
-  → Concatenation → Output File
+output_dir/
+├── frame_0000.png
+├── frame_0001.png
+├── frame_0002.png
+└── manifest.json
 ```
+
+### manifest.json
+```json
+{
+    "version": 1,
+    "total_size": 1234567,
+    "total_frames": 3,
+    "width": 1920,
+    "height": 1080,
+    "pixel_size": 2,
+    "mode": "robust"
+}
+```
+
+## Limitations
+
+- Maximum file size: ~4GB (limited by uint32 FileSize field)
+- Minimum image size: 20×20 pixels (for 2×2 pixel size)
+- All frames must use same encoding parameters
+- JPEG compression may cause decode errors (use PNG for reliability)
+
+## Dependencies
+
+- Go 1.21+
+- Standard library only (`image`, `image/png`, `image/jpeg`, `hash/crc32`)
