@@ -3,116 +3,109 @@ package format
 import (
 	"encoding/binary"
 	"hash/crc32"
-	"strings"
 )
 
 const (
-	Signature       = "TSCOPE01"
-	HeaderSize      = 64
-	Version         = uint32(1)
-	BorderBigPixels = 12
-	CalibrationBits = 0xFF
+	BorderWidth      = 12
+	TemplateSize     = 9
+	SeparatorPattern = 0xFF
+	SeparatorBits    = 8
+	MaxBitDepth      = 8
 )
 
 const (
-	ModeDense  = "dense"
-	ModeRobust = "robust"
+	MetaBitDepth    = 1
+	MetaFileSize    = 4
+	MetaFileNameLen = 1
+	MetaCRC32       = 4
+	MetaDataRows    = 2
+	MetaDataCols    = 2
+	MetaSeparator   = 1
+	MetaFileNameMax = 32
+
+	MetaMinBytes   = MetaBitDepth + MetaFileSize + MetaFileNameLen + MetaCRC32 + MetaDataRows + MetaDataCols + MetaSeparator
+	MetaFixedBytes = MetaMinBytes + MetaFileNameMax
+	MetaFixedBits  = MetaFixedBytes * 8
 )
 
-type Mode uint8
-
-const (
-	ModeDenseValue  Mode = 0
-	ModeRobustValue Mode = 1
-)
-
-type PixelSize uint8
-
-const (
-	Pixel1x1 PixelSize = 1
-	Pixel2x2 PixelSize = 2
-	Pixel3x3 PixelSize = 3
-)
-
-type Header struct {
-	Signature   [8]byte
-	Version     uint32
-	FileSize    uint32
-	FrameNum    uint32
-	TotalFrames uint32
-	DataSize    uint32
-	CRC         uint32
-	Reserved    [32]byte
+type MetaInfo struct {
+	BitDepth uint8
+	FileSize uint32
+	FileName string
+	CRC32    uint32
+	DataRows uint16
+	DataCols uint16
 }
 
-func NewHeader(fileSize, frameNum, totalFrames, dataSize uint32) *Header {
-	h := &Header{
-		Version:     Version,
-		FileSize:    fileSize,
-		FrameNum:    frameNum,
-		TotalFrames: totalFrames,
-		DataSize:    dataSize,
+func (m *MetaInfo) Serialize() []byte {
+	nameBytes := []byte(m.FileName)
+	if len(nameBytes) > MetaFileNameMax {
+		nameBytes = nameBytes[:MetaFileNameMax]
 	}
-	copy(h.Signature[:], Signature)
-	for i := range h.Reserved {
-		h.Reserved[i] = 0
-	}
-	return h
-}
 
-func (h *Header) SetFilename(filename string) {
-	if len(filename) > 31 {
-		filename = filename[:31]
-	}
-	copy(h.Reserved[:], filename)
-}
+	nameLen := len(nameBytes)
+	paddedLen := MetaFileNameMax
+	padding := paddedLen - nameLen
 
-func (h *Header) GetFilename() string {
-	filename := string(h.Reserved[:])
-	if idx := strings.Index(filename, "\x00"); idx >= 0 {
-		filename = filename[:idx]
-	}
-	return strings.TrimSpace(filename)
-}
+	data := make([]byte, 0, MetaFixedBytes)
 
-func (h *Header) Serialize() []byte {
-	data := make([]byte, HeaderSize)
-	copy(data[0:8], h.Signature[:])
-	binary.LittleEndian.PutUint32(data[8:12], h.Version)
-	binary.LittleEndian.PutUint32(data[12:16], h.FileSize)
-	binary.LittleEndian.PutUint32(data[16:20], h.FrameNum)
-	binary.LittleEndian.PutUint32(data[20:24], h.TotalFrames)
-	binary.LittleEndian.PutUint32(data[24:28], h.DataSize)
-	binary.LittleEndian.PutUint32(data[28:32], h.CRC)
-	copy(data[32:64], h.Reserved[:])
+	data = append(data, m.BitDepth)
+	data = binary.LittleEndian.AppendUint32(data, m.FileSize)
+	data = append(data, uint8(nameLen))
+	data = append(data, nameBytes...)
+	for i := 0; i < padding; i++ {
+		data = append(data, 0)
+	}
+	data = binary.LittleEndian.AppendUint32(data, m.CRC32)
+	data = binary.LittleEndian.AppendUint16(data, m.DataRows)
+	data = binary.LittleEndian.AppendUint16(data, m.DataCols)
+	data = append(data, SeparatorPattern)
+
 	return data
 }
 
-func ParseHeader(data []byte) (*Header, error) {
-	if len(data) < HeaderSize {
+func ParseMeta(data []byte) (*MetaInfo, error) {
+	if len(data) < MetaFixedBytes {
 		return nil, ErrInvalidHeader
 	}
-	h := &Header{}
-	copy(h.Signature[:], data[0:8])
-	h.Version = binary.LittleEndian.Uint32(data[8:12])
-	h.FileSize = binary.LittleEndian.Uint32(data[12:16])
-	h.FrameNum = binary.LittleEndian.Uint32(data[16:20])
-	h.TotalFrames = binary.LittleEndian.Uint32(data[20:24])
-	h.DataSize = binary.LittleEndian.Uint32(data[24:28])
-	h.CRC = binary.LittleEndian.Uint32(data[28:32])
-	copy(h.Reserved[:], data[32:64])
 
-	if string(h.Signature[:]) != Signature {
-		return nil, ErrInvalidSignature
+	m := &MetaInfo{}
+	offset := 0
+
+	m.BitDepth = data[offset]
+	offset += MetaBitDepth
+
+	m.FileSize = binary.LittleEndian.Uint32(data[offset : offset+MetaFileSize])
+	offset += MetaFileSize
+
+	nameLen := int(data[offset])
+	offset += MetaFileNameLen
+
+	if nameLen > MetaFileNameMax {
+		nameLen = MetaFileNameMax
 	}
-	if h.Version != Version {
-		return nil, ErrInvalidVersion
+
+	m.FileName = string(data[offset : offset+nameLen])
+	offset += MetaFileNameMax
+
+	m.CRC32 = binary.LittleEndian.Uint32(data[offset : offset+MetaCRC32])
+	offset += MetaCRC32
+
+	m.DataRows = binary.LittleEndian.Uint16(data[offset : offset+MetaDataRows])
+	offset += MetaDataRows
+
+	m.DataCols = binary.LittleEndian.Uint16(data[offset : offset+MetaDataCols])
+	offset += MetaDataCols
+
+	if data[offset] != SeparatorPattern {
+		return nil, ErrInvalidHeader
 	}
-	return h, nil
+
+	return m, nil
 }
 
-func (h *Header) SetCRC(data []byte) {
-	h.CRC = crc32.ChecksumIEEE(data)
+func (m *MetaInfo) SetCRC(data []byte) {
+	m.CRC32 = crc32.ChecksumIEEE(data)
 }
 
 func ValidateCRC(data []byte, expected uint32) bool {
@@ -120,99 +113,46 @@ func ValidateCRC(data []byte, expected uint32) bool {
 }
 
 type FrameInfo struct {
-	Width, Height int
-	PixelSize     PixelSize
-	Mode          Mode
-	BigPixelsW    int
-	BigPixelsH    int
-	BorderW       int
-	BorderX       int
-	BorderY       int
-	DataBigPixels int
+	Width       int
+	Height      int
+	PixelSize   int
+	BorderPx    int
+	DataCols    int
+	DataRows    int
+	StartMarker Point
+	EndMarker   Point
 }
 
-func CalcFrameInfo(width, height int, pixelSize PixelSize, mode Mode) FrameInfo {
-	borderPx := int(pixelSize) * BorderBigPixels
-	innerW := width - 2*borderPx
-	innerH := height - 2*borderPx
+type Point struct {
+	X, Y int
+}
+
+func CalcFrameInfo(width, height int, pixelSize int) FrameInfo {
+	borderPx := BorderWidth
+	templatePx := TemplateSize * pixelSize
+
+	innerW := width - 2*borderPx - 2*templatePx
+	innerH := height - 2*borderPx - 2*templatePx
 
 	if innerW < 0 || innerH < 0 {
 		return FrameInfo{}
 	}
 
-	bigPixelsW := innerW / int(pixelSize)
-	bigPixelsH := innerH / int(pixelSize)
+	cols := innerW / pixelSize
+	rows := innerH / pixelSize
 
-	dataCols := bigPixelsW - 2*BorderBigPixels
-	dataRows := bigPixelsH - 2*BorderBigPixels
-	if dataCols <= 0 || dataRows <= 0 {
-		return FrameInfo{
-			Width:         width,
-			Height:        height,
-			PixelSize:     pixelSize,
-			Mode:          mode,
-			BigPixelsW:    bigPixelsW,
-			BigPixelsH:    bigPixelsH,
-			BorderW:       borderPx,
-			DataBigPixels: 0,
-		}
+	if cols <= 0 || rows <= 0 {
+		return FrameInfo{}
 	}
-	dataBigPixels := dataCols * dataRows
 
 	return FrameInfo{
-		Width:         width,
-		Height:        height,
-		PixelSize:     pixelSize,
-		Mode:          mode,
-		BigPixelsW:    bigPixelsW,
-		BigPixelsH:    bigPixelsH,
-		BorderW:       borderPx,
-		DataBigPixels: dataBigPixels,
+		Width:       width,
+		Height:      height,
+		PixelSize:   pixelSize,
+		BorderPx:    borderPx,
+		DataCols:    cols,
+		DataRows:    rows,
+		StartMarker: Point{X: borderPx, Y: borderPx},
+		EndMarker:   Point{X: width - borderPx - templatePx, Y: height - borderPx - templatePx},
 	}
 }
-
-func (fi FrameInfo) BitsPerFrame() int {
-	if fi.Mode == ModeDenseValue {
-		return fi.DataBigPixels * 4
-	}
-	return fi.DataBigPixels * 8
-}
-
-func (fi FrameInfo) BytesPerFrame() int {
-	return fi.BitsPerFrame() / 8
-}
-
-type DensePalette [16]uint8
-
-func StandardDensePalette() DensePalette {
-	var p DensePalette
-	for i := range p {
-		p[i] = uint8(i * 17)
-	}
-	return p
-}
-
-func (p DensePalette) Encode(value uint8) uint8 {
-	nibble := value & 0x0F
-	return p[nibble]
-}
-
-func (p DensePalette) Decode(pixel uint8) uint8 {
-	best := uint8(0)
-	bestDist := uint16(65535)
-	for i, v := range p {
-		d := uint16(v)
-		if d > uint16(pixel) {
-			d = d - uint16(pixel)
-		} else {
-			d = uint16(pixel) - d
-		}
-		if d < bestDist {
-			bestDist = d
-			best = uint8(i)
-		}
-	}
-	return best
-}
-
-var DefaultDensePalette = StandardDensePalette()

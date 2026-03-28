@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"telescope/internal/codec"
-	"telescope/internal/format"
 )
 
 var reader = bufio.NewReader(os.Stdin)
@@ -89,17 +88,17 @@ func interactiveMode() {
 		height = 2160
 	}
 
-	pixelIdx := readChoice("Pixel size:", []string{"1x1 - Maximum density", "2x2 - Balanced (recommended)", "3x3 - Best for recording"}, 1)
-	pixelSizes := []int{1, 2, 3}
-	pixelSize := pixelSizes[pixelIdx]
+	pixelSize := readInt("Pixel size (1-10) [2]: ", 2)
+	if pixelSize < 1 {
+		pixelSize = 1
+	}
+	if pixelSize > 10 {
+		pixelSize = 10
+	}
 
-	modeIdx := readChoice("Encoding mode:", []string{"Robust (8-bit + redundancy)", "Dense (4-bit, max density)"}, 0)
-	modes := []string{"robust", "dense"}
-	modeStr := modes[modeIdx]
-
-	formatIdx := readChoice("Output format:", []string{"PNG (lossless, larger)", "JPEG (lossy, smaller)"}, 0)
-	formats := []string{"png", "jpeg"}
-	outFormat := formats[formatIdx]
+	bitDepth := readChoice("Bit depth:", []string{"1-bit (black/white)", "2-bit (4 levels)", "4-bit (16 levels)", "8-bit (256 levels)"}, 0)
+	bitDepths := []int{1, 2, 4, 8}
+	bd := bitDepths[bitDepth]
 
 	fmt.Println()
 	fmt.Println("╔════════════════════════════════════════╗")
@@ -109,8 +108,7 @@ func interactiveMode() {
 	fmt.Printf("║  Output:     %-26s║\n", truncate(output, 26))
 	fmt.Printf("║  Resolution: %-26s║\n", fmt.Sprintf("%dx%d", width, height))
 	fmt.Printf("║  Pixel:      %-26s║\n", fmt.Sprintf("%dx%d", pixelSize, pixelSize))
-	fmt.Printf("║  Mode:       %-26s║\n", modeStr)
-	fmt.Printf("║  Format:     %-26s║\n", outFormat)
+	fmt.Printf("║  Bit depth:  %-26s║\n", fmt.Sprintf("%d-bit", bd))
 	fmt.Println("╚════════════════════════════════════════╝")
 	fmt.Println()
 
@@ -120,22 +118,14 @@ func interactiveMode() {
 		os.Exit(0)
 	}
 
-	ps := format.PixelSize(pixelSize)
-	mode := format.ModeRobustValue
-	if modeStr == "dense" {
-		mode = format.ModeDenseValue
-	}
-
-	frames, err := codec.EncodeFile(input, output, width, height, ps, mode, outFormat, func(msg string) {
+	if err := codec.EncodeFileToDir(input, output, width, height, pixelSize, bd, func(msg string) {
 		fmt.Println("[LOG]", msg)
-	})
-	if err != nil {
+	}); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("\nSuccessfully encoded to %d frames\n", frames)
-	fmt.Printf("Output directory: %s\n", output)
+	fmt.Printf("\nSuccessfully encoded to: %s\n", output)
 }
 
 func truncate(s string, max int) string {
@@ -153,9 +143,8 @@ func main() {
 	output := flag.String("o", "frames", "Output directory for frames")
 	width := flag.Int("W", 1920, "Image width in pixels")
 	height := flag.Int("H", 1080, "Image height in pixels")
-	pixelSize := flag.Int("p", 2, "Big pixel size (1, 2, or 3)")
-	modeStr := flag.String("m", "robust", "Encoding mode: dense or robust")
-	formatStr := flag.String("f", "png", "Output format: png or jpeg")
+	pixelSize := flag.Int("p", 2, "Pixel size (number of image pixels per data point)")
+	bitDepth := flag.Int("b", 1, "Bit depth (1, 2, 4, or 8)")
 
 	flag.Parse()
 
@@ -170,45 +159,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	ps := format.PixelSize(*pixelSize)
-	if ps != format.Pixel1x1 && ps != format.Pixel2x2 && ps != format.Pixel3x3 {
-		fmt.Printf("Error: invalid pixel size %d (must be 1, 2, or 3)\n", *pixelSize)
+	if *pixelSize < 1 {
+		fmt.Printf("Error: invalid pixel size %d (must be >= 1)\n", *pixelSize)
 		os.Exit(1)
 	}
 
-	mode := format.ModeRobustValue
-	if *modeStr == "dense" {
-		mode = format.ModeDenseValue
-	} else if *modeStr != "robust" {
-		fmt.Printf("Error: invalid mode %s (must be 'dense' or 'robust')\n", *modeStr)
+	if *bitDepth != 1 && *bitDepth != 2 && *bitDepth != 4 && *bitDepth != 8 {
+		fmt.Printf("Error: invalid bit depth %d (must be 1, 2, 4, or 8)\n", *bitDepth)
 		os.Exit(1)
 	}
 
-	outFormat := *formatStr
-	if outFormat != "png" && outFormat != "jpeg" && outFormat != "jpg" {
-		fmt.Printf("Error: invalid format %s (must be 'png' or 'jpeg')\n", *formatStr)
-		os.Exit(1)
-	}
-	if outFormat == "jpg" {
-		outFormat = "jpeg"
-	}
+	outputDir := *output
 
 	fmt.Printf("Encoding configuration:\n")
 	fmt.Printf("  Input: %s\n", *input)
-	fmt.Printf("  Output: %s\n", *output)
+	fmt.Printf("  Output: %s\n", outputDir)
 	fmt.Printf("  Resolution: %dx%d\n", *width, *height)
 	fmt.Printf("  Pixel size: %dx%d\n", *pixelSize, *pixelSize)
-	fmt.Printf("  Mode: %s\n", *modeStr)
-	fmt.Printf("  Format: %s\n", outFormat)
+	fmt.Printf("  Bit depth: %d\n", *bitDepth)
 	fmt.Println()
 
-	frames, err := codec.EncodeFile(*input, *output, *width, *height, ps, mode, outFormat, func(msg string) {
+	if err := codec.EncodeFileToDir(*input, outputDir, *width, *height, *pixelSize, *bitDepth, func(msg string) {
 		fmt.Println("[LOG]", msg)
-	})
-	if err != nil {
+	}); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Successfully encoded to %d frames\n", frames)
+	fmt.Printf("Successfully encoded to: %s\n", outputDir)
 }

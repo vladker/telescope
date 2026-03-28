@@ -66,11 +66,11 @@ func readChoice(prompt string, options []string, defaultIdx int) int {
 
 func interactiveMode() {
 	fmt.Println("╔════════════════════════════════════════╗")
-	fmt.Println("║     Telescope Decoder - Interactive     ║")
+	fmt.Println("║     Telescope Decoder - Interactive    ║")
 	fmt.Println("╚════════════════════════════════════════╝")
 	fmt.Println()
 
-	input := readLine("Input (directory with frames or video file): ")
+	input := readLine("Input (image file or video): ")
 	if input == "" {
 		fmt.Println("Error: input required")
 		os.Exit(1)
@@ -89,18 +89,16 @@ func interactiveMode() {
 		if isVideo {
 			fmt.Println("Video file detected.")
 		} else {
-			fmt.Println("Directory detected.")
+			fmt.Println("Image file detected.")
 		}
 	}
 
-	output := readLine("Output directory [decoded]: ")
+	output := readLine("Output file [decoded]: ")
 	if output == "" {
 		output = "decoded"
 	}
 
 	var fps float64 = 1.0
-	var unique bool = true
-	var force bool = false
 
 	if isVideo {
 		fps = readFloat("FPS for extraction (0.5-30) [1.0]: ", 1.0)
@@ -112,9 +110,6 @@ func interactiveMode() {
 		}
 	}
 
-	unique = readBool("Extract unique frames only", true)
-	force = !readBool("Validate CRC checksums", true)
-
 	fmt.Println()
 	fmt.Println("╔════════════════════════════════════════╗")
 	fmt.Println("║           Configuration                 ║")
@@ -125,10 +120,8 @@ func interactiveMode() {
 		if isVideo {
 			return fmt.Sprintf("Video @ %.1f fps", fps)
 		}
-		return "Directory"
+		return "Image"
 	}())
-	fmt.Printf("║  Unique:     %-26s║\n", strconv.FormatBool(unique))
-	fmt.Printf("║  CRC Check:  %-26s║\n", strconv.FormatBool(!force))
 	fmt.Println("╚════════════════════════════════════════╝")
 	fmt.Println()
 
@@ -148,78 +141,58 @@ func interactiveMode() {
 		fmt.Printf("Extracting frames at %.1f FPS...\n", fps)
 		if err := detector.ExtractFramesFromVideo(input, tempDir, fps); err != nil {
 			fmt.Printf("Error extracting frames: %v\n", err)
+			fmt.Println("Install ffmpeg: winget install ffmpeg")
 			os.Exit(1)
 		}
 		input = tempDir
 	}
 
-	scanner := detector.NewScanner(unique)
-	framePaths, err := scanner.ScanDirectory(input)
+	entries, err := os.ReadDir(input)
 	if err != nil {
-		fmt.Printf("Error scanning directory: %v\n", err)
-		fmt.Println("\nPress Enter to exit...")
-		reader.ReadString('\n')
+		fmt.Printf("Error reading directory: %v\n", err)
 		os.Exit(1)
+	}
+
+	var framePaths []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
+			framePaths = append(framePaths, filepath.Join(input, entry.Name()))
+		}
 	}
 
 	if len(framePaths) == 0 {
-		fmt.Println("Error: no frames found")
-		fmt.Println("\nPress Enter to exit...")
-		reader.ReadString('\n')
+		fmt.Println("Error: no image frames found")
 		os.Exit(1)
 	}
 
-	filename := codec.ExtractFilenameFromFrames(framePaths)
-	if filename == "" {
-		filename = filepath.Base(input) + "_restored"
-	}
+	fmt.Printf("Found %d frame(s)\n", len(framePaths))
 
-	if info, err := os.Stat(output); err == nil && info.IsDir() {
-		output = filepath.Join(output, filename)
-		fmt.Printf("Output: %s\n", output)
-	} else if output == "decoded" {
-		output = filepath.Join("decoded", filename)
-		if err := os.MkdirAll("decoded", 0755); err != nil {
-			fmt.Printf("Error creating decoded directory: %v\n", err)
-			os.Exit(1)
+	for _, framePath := range framePaths {
+		fmt.Printf("Decoding: %s\n", filepath.Base(framePath))
+
+		data, filename, err := codec.DecodeFile(framePath, nil)
+		if err != nil {
+			fmt.Printf("Error decoding %s: %v\n", filepath.Base(framePath), err)
+			continue
 		}
-		fmt.Printf("Output: %s\n", output)
+
+		outputPath := output
+		if output == "decoded" {
+			os.MkdirAll("decoded", 0755)
+			outputPath = filepath.Join("decoded", filename)
+		}
+
+		if err := codec.SaveFile(data, outputPath); err != nil {
+			fmt.Printf("Error saving %s: %v\n", outputPath, err)
+			continue
+		}
+
+		fmt.Printf("Saved: %s (%d bytes)\n", outputPath, len(data))
 	}
-
-	fmt.Printf("Found %d frames\n", len(framePaths))
-	fmt.Println("Decoding frames...")
-
-	frames, err := codec.DecodeFramesFromPathsWithLogger(framePaths, func(msg string) {
-		fmt.Println("[LOG]", msg)
-	}, force)
-	if err != nil {
-		fmt.Printf("Error decoding frames: %v\n", err)
-		fmt.Println("\nPress Enter to exit...")
-		reader.ReadString('\n')
-		os.Exit(1)
-	}
-
-	if len(frames) == 0 {
-		fmt.Println("Error: no valid frames decoded")
-		fmt.Println("\nPress Enter to exit...")
-		reader.ReadString('\n')
-		os.Exit(1)
-	}
-
-	fmt.Printf("Successfully decoded %d frames\n", len(frames))
-	fmt.Printf("Reconstructing file: %s\n", output)
-
-	if err := codec.ReconstructFile(frames, output); err != nil {
-		fmt.Printf("Error reconstructing file: %v\n", err)
-		fmt.Println("\nPress Enter to exit...")
-		reader.ReadString('\n')
-		os.Exit(1)
-	}
-
-	info, _ = os.Stat(output)
-	fmt.Printf("\nOutput file size: %d bytes\n", info.Size())
-	fmt.Println("\nPress Enter to exit...")
-	reader.ReadString('\n')
 }
 
 func truncate(s string, max int) string {
@@ -233,13 +206,11 @@ func main() {
 	interactive := flag.Bool("I", false, "Interactive mode")
 	flag.BoolVar(interactive, "interactive", false, "Interactive mode")
 
-	input := flag.String("i", "", "Input directory with frames or video file (required)")
-	output := flag.String("o", "decoded", "Output file path or directory")
-	isVideo := flag.Bool("video", false, "Input is a video file (auto-detected by extension)")
+	input := flag.String("i", "", "Input image file or directory with frames")
+	output := flag.String("o", "decoded", "Output file or directory")
+	isVideo := flag.Bool("video", false, "Input is a video file")
 	flag.BoolVar(isVideo, "v", false, "Input is a video file")
 	fps := flag.Float64("fps", 1.0, "FPS for video frame extraction")
-	unique := flag.Bool("unique", true, "Extract only unique frames")
-	force := flag.Bool("force", false, "Skip CRC validation")
 
 	flag.Parse()
 
@@ -254,36 +225,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	if !*isVideo {
+	info, err := os.Stat(*input)
+	if os.IsNotExist(err) {
+		fmt.Printf("Error: '%s' not found\n", *input)
+		os.Exit(1)
+	}
+
+	videoMode := *isVideo
+	if !videoMode && !info.IsDir() {
 		ext := strings.ToLower(filepath.Ext(*input))
 		videoExts := map[string]bool{".mp4": true, ".avi": true, ".mkv": true, ".mov": true, ".webm": true, ".wmv": true}
 		if videoExts[ext] {
-			*isVideo = true
-		}
-	}
-
-	if !*isVideo {
-		if info, err := os.Stat(*input); err == nil && info.IsDir() {
-			entries, _ := os.ReadDir(*input)
-			for _, entry := range entries {
-				if entry.IsDir() {
-					continue
-				}
-				ext := strings.ToLower(filepath.Ext(entry.Name()))
-				videoExts := map[string]bool{".mp4": true, ".avi": true, ".mkv": true, ".mov": true, ".webm": true, ".wmv": true}
-				if videoExts[ext] {
-					*input = filepath.Join(*input, entry.Name())
-					*isVideo = true
-					break
-				}
-			}
+			videoMode = true
 		}
 	}
 
 	var tempDir string
-	var err error
 
-	if *isVideo {
+	if videoMode {
 		fmt.Println("Video file detected, extracting frames...")
 		tempDir = filepath.Join(os.TempDir(), "telescope-frames")
 		os.MkdirAll(tempDir, 0755)
@@ -293,77 +252,76 @@ func main() {
 		if err := detector.ExtractFramesFromVideo(*input, tempDir, *fps); err != nil {
 			fmt.Printf("Error: ffmpeg not found or failed\n")
 			fmt.Printf("Install ffmpeg: winget install ffmpeg\n")
-			fmt.Printf("Or extract frames manually: ffmpeg -i \"%s\" -vf fps=1 frame_%%04d.png\n", *input)
 			os.Exit(1)
 		}
 		*input = tempDir
 	}
 
-	scanner := detector.NewScanner(*unique)
-	framePaths, err := scanner.ScanDirectory(*input)
-	if err != nil {
-		fmt.Printf("Error scanning directory: %v\n", err)
-		fmt.Println("\nPress Enter to exit...")
-		reader.ReadString('\n')
-		os.Exit(1)
-	}
-
-	if len(framePaths) == 0 {
-		fmt.Println("Error: no frames found")
-		fmt.Println("\nPress Enter to exit...")
-		reader.ReadString('\n')
-		os.Exit(1)
-	}
-
-	filename := codec.ExtractFilenameFromFrames(framePaths)
-	if filename == "" {
-		filename = filepath.Base(*input) + "_restored"
-	}
-
-	if info, err := os.Stat(*output); err == nil && info.IsDir() {
-		*output = filepath.Join(*output, filename)
-		fmt.Printf("Output: %s\n", *output)
-	} else if *output == "decoded" || *output == "" {
-		*output = filepath.Join("decoded", filename)
-		if err := os.MkdirAll("decoded", 0755); err != nil {
-			fmt.Printf("Error creating decoded directory: %v\n", err)
-			os.Exit(1)
+	entries, err := os.ReadDir(*input)
+	if err == nil && len(entries) > 0 {
+		var framePaths []string
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			ext := strings.ToLower(filepath.Ext(entry.Name()))
+			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
+				framePaths = append(framePaths, filepath.Join(*input, entry.Name()))
+			}
 		}
-		fmt.Printf("Output: %s\n", *output)
+
+		if len(framePaths) > 0 {
+			fmt.Printf("Found %d frame(s)\n", len(framePaths))
+
+			for _, framePath := range framePaths {
+				fmt.Printf("Decoding: %s\n", filepath.Base(framePath))
+
+				data, filename, err := codec.DecodeFile(framePath, func(msg string) {
+					fmt.Println("[LOG]", msg)
+				})
+				if err != nil {
+					fmt.Printf("Error decoding %s: %v\n", filepath.Base(framePath), err)
+					continue
+				}
+
+				outputPath := *output
+				if info, err := os.Stat(*output); err == nil && info.IsDir() {
+					outputPath = filepath.Join(*output, filename)
+				}
+
+				if err := codec.SaveFile(data, outputPath); err != nil {
+					fmt.Printf("Error saving %s: %v\n", outputPath, err)
+					continue
+				}
+
+				fmt.Printf("Saved: %s (%d bytes)\n", outputPath, len(data))
+			}
+			return
+		}
 	}
 
-	fmt.Printf("Found %d frames\n", len(framePaths))
-	fmt.Println("Decoding frames...")
+	fmt.Printf("Decoding: %s\n", filepath.Base(*input))
 
-	frames, err := codec.DecodeFramesFromPathsWithLogger(framePaths, func(msg string) {
-		fmt.Println("[LOG]", msg)
-	}, *force)
+	data, filename, err := codec.DecodeFile(*input, nil)
 	if err != nil {
-		fmt.Printf("Error decoding frames: %v\n", err)
-		fmt.Println("\nPress Enter to exit...")
-		reader.ReadString('\n')
+		fmt.Printf("Error decoding: %v\n", err)
 		os.Exit(1)
 	}
 
-	if len(frames) == 0 {
-		fmt.Println("Error: no valid frames decoded")
-		fmt.Println("\nPress Enter to exit...")
-		reader.ReadString('\n')
+	outputPath := *output
+	if *output == "decoded" || filepath.Ext(*output) == "" {
+		if filepath.Ext(*output) == "" && !strings.HasPrefix(*output, ".") {
+			os.MkdirAll(*output, 0755)
+			outputPath = filepath.Join(*output, filename)
+		} else {
+			outputPath = filename
+		}
+	}
+
+	if err := codec.SaveFile(data, outputPath); err != nil {
+		fmt.Printf("Error saving: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Successfully decoded %d frames\n", len(frames))
-	fmt.Printf("Reconstructing file: %s\n", *output)
-
-	if err := codec.ReconstructFile(frames, *output); err != nil {
-		fmt.Printf("Error reconstructing file: %v\n", err)
-		fmt.Println("\nPress Enter to exit...")
-		reader.ReadString('\n')
-		os.Exit(1)
-	}
-
-	info, _ := os.Stat(*output)
-	fmt.Printf("Output file size: %d bytes\n", info.Size())
-	fmt.Println("\nPress Enter to exit...")
-	reader.ReadString('\n')
+	fmt.Printf("Saved: %s (%d bytes)\n", outputPath, len(data))
 }

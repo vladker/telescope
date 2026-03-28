@@ -2,35 +2,27 @@ package codec
 
 import (
 	"fmt"
-	"hash/crc32"
 	"image"
+	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	"telescope/internal/format"
 )
 
 type Decoder struct {
-	palette format.DensePalette
-	logger  func(string)
+	logger func(string)
 }
 
 type DecodeLogger func(string)
 
 func NewDecoder() *Decoder {
-	return &Decoder{
-		palette: format.DefaultDensePalette,
-	}
+	return &Decoder{}
 }
 
 func NewDecoderWithLogger(logger func(string)) *Decoder {
-	return &Decoder{
-		palette: format.DefaultDensePalette,
-		logger:  logger,
-	}
+	return &Decoder{logger: logger}
 }
 
 func (d *Decoder) log(format string, args ...interface{}) {
@@ -39,461 +31,252 @@ func (d *Decoder) log(format string, args ...interface{}) {
 	}
 }
 
-// DetectFrameInfo определяет параметры кадра с улучшенным поиском бордера
 func (d *Decoder) DetectFrameInfo(img image.Image) (format.FrameInfo, error) {
 	bounds := img.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
 	d.log("DetectFrameInfo: image is %dx%d", width, height)
 
-	// Пробуем разные размеры пикселей от большего к меньшему
-	for ps := format.Pixel3x3; ps >= format.Pixel1x1; ps-- {
-		borderPx := int(ps) * format.BorderBigPixels
-		d.log("  Testing pixelSize=%d: borderPx=%d", ps, borderPx)
+	borderX, borderY := d.findBorder(img)
+	if borderX == 0 && borderY == 0 {
+		return format.FrameInfo{}, fmt.Errorf("%w: border not found", format.ErrNoBorderFound)
+	}
+	d.log("Found border at: (%d, %d)", borderX, borderY)
 
-		if borderPx*2 >= width || borderPx*2 >= height {
-			d.log("    Skipping: image too small for this pixel size")
-			continue
-		}
+	startMarker, pixelSize := d.findTemplate(img, borderX, borderY)
+	if startMarker.X == 0 && startMarker.Y == 0 {
+		return format.FrameInfo{}, fmt.Errorf("%w: start template not found", format.ErrNoTemplateFound)
+	}
+	d.log("Found start template at: (%d, %d), pixelSize: %d", startMarker.X, startMarker.Y, pixelSize)
 
-		// Ищем бордер с полным перебором возможных смещений
-		offset, valid, matchPct := d.findBorderExhaustive(img, ps)
-		d.log("    Border search: offset=(%d,%d), valid=%v, match=%.1f%%", offset.x, offset.y, valid, matchPct*100)
-		
-		if valid && matchPct >= 0.8 {
-			d.log("Detected pixelSize: %d, borderOffset: (%d, %d)", ps, offset.x, offset.y)
-			return d.buildFrameInfo(img, width, height, ps, offset.x, offset.y)
-		}
+	borderPx := borderX
+	templatePx := format.TemplateSize * pixelSize
+	innerW := width - 2*borderPx - 2*templatePx
+	innerH := height - 2*borderPx - 2*templatePx
+
+	fi := format.FrameInfo{
+		Width:       width,
+		Height:      height,
+		PixelSize:   pixelSize,
+		BorderPx:    borderPx,
+		DataCols:    innerW / pixelSize,
+		DataRows:    innerH / pixelSize,
+		StartMarker: startMarker,
+		EndMarker:   format.Point{X: width - borderPx - templatePx, Y: height - borderPx - templatePx},
 	}
 
-	// Если не нашли с порогом 80%, пробуем найти лучший вариант
-	for ps := format.Pixel3x3; ps >= format.Pixel1x1; ps-- {
-		borderPx := int(ps) * format.BorderBigPixels
-		if borderPx*2 >= width || borderPx*2 >= height {
-			continue
-		}
-
-		offset, valid, matchPct := d.findBorderExhaustive(img, ps)
-		if valid && matchPct >= 0.5 {
-			d.log("Detected pixelSize: %d, borderOffset: (%d, %d) [relaxed]", ps, offset.x, offset.y)
-			return d.buildFrameInfo(img, width, height, ps, offset.x, offset.y)
-		}
-	}
-
-	return format.FrameInfo{}, fmt.Errorf("%w: no valid border found in image", format.ErrNoBorderFound)
+	d.log("FrameInfo: DataCols=%d, DataRows=%d", fi.DataCols, fi.DataRows)
+	return fi, nil
 }
 
-// buildFrameInfo строит FrameInfo после обнаружения бордера
-func (d *Decoder) buildFrameInfo(img image.Image, width, height int, pixelSize format.PixelSize, borderOffsetX, borderOffsetY int) (format.FrameInfo, error) {
-	borderPx := int(pixelSize) * format.BorderBigPixels
-	innerW := width - 2*borderPx
-	innerH := height - 2*borderPx
-	bigPixelsW := innerW / int(pixelSize)
-	bigPixelsH := innerH / int(pixelSize)
+func (d *Decoder) findBorder(img image.Image) (int, int) {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
 
-	dataCols := bigPixelsW - 2*format.BorderBigPixels
-	dataRows := bigPixelsH - 2*format.BorderBigPixels
-	dataBigPixels := dataCols * dataRows
+	whiteCount := 0
+	borderSize := format.BorderWidth
 
-	// Определяем режим по мета-данным
-	mode := format.ModeRobustValue
-	if bigPixelsH > format.BorderBigPixels*2 && bigPixelsW > format.BorderBigPixels*2 {
-		metaRow := format.BorderBigPixels
-		metaCol := format.BorderBigPixels
-		sampleGray := d.getBigPixelGrayWithBorder(img, metaCol, metaRow, int(pixelSize), borderPx, borderOffsetX, borderOffsetY)
-		invertedGray := d.getBigPixelGrayWithBorder(img, metaCol, metaRow+1, int(pixelSize), borderPx, borderOffsetX, borderOffsetY)
-		d.log("Meta sample: row=%d, col=%d, gray=%d, invertedGray=%d", metaRow, metaCol, sampleGray, invertedGray)
+	for x := 0; x < width; x++ {
+		c := img.At(x, 0)
+		if isWhite(c) {
+			whiteCount++
+		}
+	}
+	if whiteCount < width/2 {
+		return 0, 0
+	}
 
-		sampleDecoded := d.palette.Decode(sampleGray)
-		isDenseValue := sampleDecoded <= 15
+	borderX := borderSize
+	borderY := borderSize
 
-		if sampleGray > 200 && invertedGray < 50 {
-			mode = format.ModeRobustValue
-			d.log("Detected mode: robust (inverted row pattern)")
-		} else if isDenseValue && sampleGray%17 == 0 {
-			mode = format.ModeDenseValue
-			d.log("Detected mode: dense (palette value 0x%02X decoded to %d)", sampleGray, sampleDecoded)
+	if borderX > width/2 {
+		borderX = width / 2
+	}
+	if borderY > height/2 {
+		borderY = height / 2
+	}
+
+	return borderX, borderY
+}
+
+func (d *Decoder) findTemplate(img image.Image, borderX, borderY int) (format.Point, int) {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	for ps := 1; ps <= 20; ps++ {
+		templatePx := format.TemplateSize * ps
+		if borderX+templatePx > width || borderY+templatePx > height {
+			continue
+		}
+
+		startX := borderX
+		startY := borderY
+
+		if d.matchTemplate(img, startX, startY, ps) {
+			return format.Point{X: startX, Y: startY}, ps
+		}
+	}
+
+	return format.Point{}, 0
+}
+
+func (d *Decoder) matchTemplate(img image.Image, startX, startY, pixelSize int) bool {
+	for row := 0; row < format.TemplateSize; row++ {
+		for col := 0; col < format.TemplateSize; col++ {
+			x := startX + col*pixelSize + pixelSize/2
+			y := startY + row*pixelSize + pixelSize/2
+			c := img.At(x, y)
+			expectedWhite := (row+col)%2 == 0
+			isWhiteVal := isWhite(c)
+			if expectedWhite != isWhiteVal {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isWhite(c color.Color) bool {
+	r, g, b, _ := c.RGBA()
+	avg := (r + g + b) / 3
+	return avg > 32768
+}
+
+func (d *Decoder) DecodeImage(img image.Image, fi format.FrameInfo) ([]byte, error) {
+	data, _, err := d.DecodeImageWithMeta(img, fi)
+	return data, err
+}
+
+func (d *Decoder) DecodeImageWithMeta(img image.Image, fi format.FrameInfo) ([]byte, *format.MetaInfo, error) {
+	d.log("Decoding image with pixelSize=%d, DataCols=%d, DataRows=%d", fi.PixelSize, fi.DataCols, fi.DataRows)
+
+	metaData, err := d.decodeMetaData(img, fi)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to decode meta: %w", err)
+	}
+
+	metaInfo, err := format.ParseMeta(metaData)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse meta: %w", err)
+	}
+
+	d.log("Meta: bitDepth=%d, fileSize=%d, filename=%s, dataRows=%d, dataCols=%d",
+		metaInfo.BitDepth, metaInfo.FileSize, metaInfo.FileName, metaInfo.DataRows, metaInfo.DataCols)
+
+	data, err := d.decodeData(img, fi, metaInfo)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to decode data: %w", err)
+	}
+
+	if !format.ValidateCRC(data, metaInfo.CRC32) {
+		d.log("WARNING: CRC mismatch - data may be corrupted")
+	}
+
+	return data, metaInfo, nil
+}
+
+func (d *Decoder) decodeMetaData(img image.Image, fi format.FrameInfo) ([]byte, error) {
+	px := fi.PixelSize
+	startX := fi.StartMarker.X + format.TemplateSize*px
+	startY := fi.StartMarker.Y + format.TemplateSize*px
+
+	metaBits := format.MetaFixedBits
+	bytesNeeded := (metaBits + 7) / 8
+
+	result := make([]byte, bytesNeeded)
+	bitIndex := 0
+
+	row := 0
+	col := 0
+
+	for bitIndex < metaBits {
+		x := startX + col*px
+		y := startY + row*px
+		c := img.At(x, y)
+		bitValue := 0
+		if isWhite(c) {
+			bitValue = 1
+		}
+
+		byteIdx := bitIndex / 8
+		bitPos := 7 - (bitIndex % 8)
+		if bitValue == 1 {
+			result[byteIdx] |= (1 << bitPos)
+		}
+
+		col++
+		if col >= fi.DataCols {
+			col = 0
+			row++
+		}
+		bitIndex++
+
+		if bitIndex >= metaBits {
+			break
+		}
+	}
+
+	return result, nil
+}
+
+func (d *Decoder) decodeData(img image.Image, fi format.FrameInfo, metaInfo *format.MetaInfo) ([]byte, error) {
+	px := fi.PixelSize
+	dataCols := int(metaInfo.DataCols)
+	dataRows := int(metaInfo.DataRows)
+
+	startX := fi.StartMarker.X + format.TemplateSize*px
+	startY := fi.StartMarker.Y + format.TemplateSize*px + (format.MetaFixedBits+dataCols-1)/dataCols*px
+
+	bitsPerPoint := int(metaInfo.BitDepth)
+	maxValue := (1 << bitsPerPoint) - 1
+
+	totalBits := dataRows * dataCols * bitsPerPoint
+	totalBytes := (totalBits + 7) / 8
+
+	result := make([]byte, totalBytes)
+
+	row := 0
+	col := 0
+	bitBuffer := make([]bool, 0, totalBits)
+
+	for row < dataRows {
+		x := startX + col*px + px/2
+		y := startY + row*px + px/2
+		c := img.At(x, y)
+
+		var value uint8
+		if isWhite(c) {
+			value = uint8(maxValue)
 		} else {
-			mode = format.ModeRobustValue
-			d.log("Detected mode: robust (default)")
+			r, _, _, _ := c.RGBA()
+			gray := uint8(r >> 8)
+			value = uint8(float64(gray) / 255.0 * float64(maxValue))
+		}
+
+		for b := bitsPerPoint - 1; b >= 0; b-- {
+			bitBuffer = append(bitBuffer, (value>>b)&1 == 1)
+		}
+
+		col++
+		if col >= dataCols {
+			col = 0
+			row++
 		}
 	}
 
-	return format.FrameInfo{
-		Width:         width,
-		Height:        height,
-		PixelSize:     pixelSize,
-		Mode:          mode,
-		BigPixelsW:    bigPixelsW,
-		BigPixelsH:    bigPixelsH,
-		BorderW:       borderPx,
-		BorderX:       borderOffsetX,
-		BorderY:       borderOffsetY,
-		DataBigPixels: dataBigPixels,
-	}, nil
-}
-
-type point struct {
-	x, y int
-}
-
-// findBorderExhaustive ищет бордер полным перебором всех возможных позиций
-func (d *Decoder) findBorderExhaustive(img image.Image, pixelSize format.PixelSize) (point, bool, float64) {
-	bounds := img.Bounds()
-	width := bounds.Dx()
-	height := bounds.Dy()
-	borderPx := int(pixelSize) * format.BorderBigPixels
-
-	bestMatch := 0.0
-	bestOffset := point{0, 0}
-
-	// Шаг сканирования - меньше для точности
-	step := int(pixelSize)
-	if step < 2 {
-		step = 2
-	}
-
-	// Сканируем все возможные позиции бордера
-	for y := 0; y <= height-borderPx*2; y += step {
-		for x := 0; x <= width-borderPx*2; x += step {
-			_, matchPct := d.validateBorderAtOffset(img, x, y, borderPx, int(pixelSize))
-			if matchPct > bestMatch {
-				bestMatch = matchPct
-				bestOffset = point{x, y}
+	for i := 0; i < len(bitBuffer); i += 8 {
+		var b byte
+		for j := 0; j < 8 && i+j < len(bitBuffer); j++ {
+			if bitBuffer[i+j] {
+				b |= (1 << (7 - j))
 			}
 		}
+		result[i/8] = b
 	}
 
-	// Считаем валидным если совпадение >= 70%
-	return bestOffset, bestMatch >= 0.7, bestMatch
-}
-
-func (d *Decoder) validateBorderAtOffset(img image.Image, offsetX, offsetY, borderPx, pixelSize int) (bool, float64) {
-	bounds := img.Bounds()
-	width := bounds.Dx()
-	height := bounds.Dy()
-
-	matchCount := 0
-	totalChecks := 0
-
-	// Проверяем верхний бордер (шахматный паттерн)
-	for i := 0; i < 8*pixelSize && i < width-offsetX; i += pixelSize {
-		for check := 0; check < 4 && offsetY+check*pixelSize < height; check++ {
-			x := offsetX + i
-			y := offsetY + check*pixelSize
-			if x >= width || y >= height {
-				continue
-			}
-			bigX := i / pixelSize
-			bigY := check
-			gray := d.getBigPixelGrayAt(img, x, y, pixelSize)
-			totalChecks++
-			expected := 0
-			if (bigX+bigY)%2 == 0 {
-				expected = 255
-			}
-			// Учитываем небольшие отклонения из-за JPEG сжатия
-			if int(gray) == expected || (gray > 240 && expected == 255) || (gray < 15 && expected == 0) {
-				matchCount++
-			}
-		}
-	}
-
-	// Проверяем левый бордер (шахматный паттерн)
-	for i := 0; i < 8*pixelSize && i < height-offsetY; i += pixelSize {
-		for check := 0; check < 4 && offsetX+check*pixelSize < width; check++ {
-			x := offsetX + check*pixelSize
-			y := offsetY + i
-			if x >= width || y >= height {
-				continue
-			}
-			bigX := check
-			bigY := i / pixelSize
-			gray := d.getBigPixelGrayAt(img, x, y, pixelSize)
-			totalChecks++
-			expected := 0
-			if (bigX+bigY)%2 == 0 {
-				expected = 255
-			}
-			if int(gray) == expected || (gray > 240 && expected == 255) || (gray < 15 && expected == 0) {
-				matchCount++
-			}
-		}
-	}
-
-	if totalChecks == 0 {
-		return false, 0
-	}
-	return matchCount > totalChecks*7/10, float64(matchCount) / float64(totalChecks)
-}
-
-func (d *Decoder) getBigPixelGrayAt(img image.Image, x, y, size int) uint8 {
-	var sum uint32
-	count := 0
-	bounds := img.Bounds()
-	for py := y; py < y+size && py < bounds.Max.Y; py++ {
-		for px := x; px < x+size && px < bounds.Max.X; px++ {
-			var gray uint8
-			switch m := img.(type) {
-			case *image.Gray:
-				gray = m.GrayAt(px, py).Y
-			case *image.RGBA:
-				pixel := m.RGBAAt(px, py)
-				gray = uint8((int(pixel.R) + int(pixel.G) + int(pixel.B)) / 3)
-			default:
-				r, g, b, _ := img.At(px, py).RGBA()
-				gray = uint8((int(r) + int(g) + int(b)) / 3 >> 8)
-			}
-			sum += uint32(gray)
-			count++
-		}
-	}
-	if count == 0 {
-		return 0
-	}
-	return uint8(sum / uint32(count))
-}
-
-func (d *Decoder) getBigPixelGrayAtOffset(img image.Image, bigX, bigY, size, offsetX, offsetY int) uint8 {
-	startX := offsetX + bigX*size
-	startY := offsetY + bigY*size
-	return d.getBigPixelGrayAt(img, startX, startY, size)
-}
-
-func (d *Decoder) getBigPixelGrayWithBorder(img image.Image, bigX, bigY, size, borderPx, borderX, borderY int) uint8 {
-	startX := borderX + borderPx + bigX*size
-	startY := borderY + borderPx + bigY*size
-	return d.getBigPixelGrayAt(img, startX, startY, size)
-}
-
-func (d *Decoder) validateBorder(img image.Image, borderPx, pixelSize int) bool {
-	_, matchPct := d.validateBorderDetailed(img, borderPx, pixelSize)
-	return matchPct > 0.7
-}
-
-func (d *Decoder) validateBorderDetailed(img image.Image, borderPx, pixelSize int) (bool, float64) {
-	bounds := img.Bounds()
-	width := bounds.Dx()
-	height := bounds.Dy()
-
-	matchCount := 0
-	totalChecks := 0
-
-	for offset := 0; offset < 8*pixelSize; offset += pixelSize {
-		for check := 0; check < 4; check++ {
-			x := offset
-			y := check * pixelSize
-			if x >= width || y >= height {
-				continue
-			}
-			gray := d.getBigPixelGray(img, x/pixelSize, y/pixelSize, pixelSize, 0)
-			totalChecks++
-			expected := 0
-			if (offset/pixelSize+check)%2 == 0 {
-				expected = 255
-			}
-			if int(gray) == expected || (gray > 240 && expected == 255) || (gray < 15 && expected == 0) {
-				matchCount++
-			}
-		}
-	}
-
-	if totalChecks == 0 {
-		return false, 0
-	}
-	return matchCount > totalChecks*7/10, float64(matchCount) / float64(totalChecks)
-}
-
-func (d *Decoder) getBigPixelGray(img image.Image, bigX, bigY, size, borderPx int) uint8 {
-	startX := borderPx + bigX*size
-	startY := borderPx + bigY*size
-
-	var sum uint32
-	count := 0
-	for y := startY; y < startY+size && y < img.Bounds().Dy(); y++ {
-		for x := startX; x < startX+size && x < img.Bounds().Dx(); x++ {
-			var gray uint8
-			switch m := img.(type) {
-			case *image.Gray:
-				gray = m.GrayAt(x, y).Y
-			case *image.RGBA:
-				pixel := m.RGBAAt(x, y)
-				gray = uint8((int(pixel.R) + int(pixel.G) + int(pixel.B)) / 3)
-			default:
-				r, g, b, _ := img.At(x, y).RGBA()
-				gray = uint8((int(r) + int(g) + int(b)) / 3 >> 8)
-			}
-			sum += uint32(gray)
-			count++
-		}
-	}
-
-	if count == 0 {
-		return 0
-	}
-	return uint8(sum / uint32(count))
-}
-
-func (d *Decoder) DecodeFrame(img image.Image) ([]byte, *format.Header, error) {
-	return d.DecodeFrameWithSkip(img, false)
-}
-
-func (d *Decoder) ReadHeader(img image.Image) (*format.Header, error) {
-	headerData, _, err := d.readHeaderFromImage(img)
-	if err != nil {
-		return nil, err
-	}
-	return format.ParseHeader(headerData)
-}
-
-func (d *Decoder) readHeaderFromImage(img image.Image) ([]byte, format.FrameInfo, error) {
-	fi, err := d.DetectFrameInfo(img)
-	if err != nil {
-		return nil, fi, fmt.Errorf("failed to detect frame info: %w", err)
-	}
-
-	borderPx := fi.BorderW
-	ps := int(fi.PixelSize)
-	borderX := fi.BorderX
-	borderY := fi.BorderY
-
-	var headerData []byte
-	var headerRows int
-	colsPerRow := fi.BigPixelsW - 2*format.BorderBigPixels
-
-	if fi.Mode == format.ModeDenseValue {
-		headerBigPixels := format.HeaderSize * 2
-		headerRows = headerBigPixels / colsPerRow
-		if headerBigPixels%colsPerRow != 0 {
-			headerRows++
-		}
-		headerData = d.readDenseDataWithBorder(img, format.BorderBigPixels, headerRows, colsPerRow, colsPerRow, fi.BigPixelsH, ps, borderPx, borderX, borderY, format.HeaderSize)
-	} else {
-		for row := format.BorderBigPixels; row < format.BorderBigPixels*2; row++ {
-			for col := format.BorderBigPixels; col < fi.BigPixelsW-format.BorderBigPixels; col++ {
-				if len(headerData) >= format.HeaderSize {
-					break
-				}
-				gray := d.getBigPixelGrayWithBorder(img, col, row, ps, borderPx, borderX, borderY)
-				headerData = append(headerData, gray)
-			}
-		}
-	}
-
-	if len(headerData) < format.HeaderSize {
-		return nil, fi, fmt.Errorf("%w: expected %d bytes, got %d", format.ErrInvalidHeader, format.HeaderSize, len(headerData))
-	}
-
-	return headerData, fi, nil
-}
-
-func (d *Decoder) DecodeFrameWithSkip(img image.Image, skipCRC bool) ([]byte, *format.Header, error) {
-	headerData, fi, err := d.readHeaderFromImage(img)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	d.log("Decoding frame: %dx%d, pixelSize=%d, mode=%d, bigPixels=%dx%d, dataBigPixels=%d",
-		fi.Width, fi.Height, fi.PixelSize, fi.Mode, fi.BigPixelsW, fi.BigPixelsH, fi.DataBigPixels)
-
-	d.log("Read %d bytes of header data", len(headerData))
-
-	header, err := format.ParseHeader(headerData)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse header: %w", err)
-	}
-
-	d.log("Header parsed: frameNum=%d, totalFrames=%d, dataSize=%d, crc=0x%08x",
-		header.FrameNum, header.TotalFrames, header.DataSize, header.CRC)
-
-	borderPx := fi.BorderW
-	ps := int(fi.PixelSize)
-	borderX := fi.BorderX
-	borderY := fi.BorderY
-	colsPerRow := fi.BigPixelsW - 2*format.BorderBigPixels
-
-	var frameData []byte
-	if fi.Mode == format.ModeDenseValue {
-		headerRows := format.HeaderSize * 2 / colsPerRow
-		if (format.HeaderSize*2)%colsPerRow != 0 {
-			headerRows++
-		}
-		dataStartRow := format.BorderBigPixels + headerRows
-		frameDataRows := fi.BigPixelsH - format.BorderBigPixels - headerRows
-		frameData = d.readDenseDataWithBorder(img, dataStartRow, frameDataRows, colsPerRow, colsPerRow, fi.BigPixelsH, ps, borderPx, borderX, borderY, int(header.DataSize))
-	} else {
-		dataStartRow := format.BorderBigPixels * 2
-		dataEndRow := fi.BigPixelsH - format.BorderBigPixels
-
-		for row := dataStartRow; row < dataEndRow; row++ {
-			for col := format.BorderBigPixels; col < fi.BigPixelsW-format.BorderBigPixels; col++ {
-				gray := d.getBigPixelGrayWithBorder(img, col, row, ps, borderPx, borderX, borderY)
-				frameData = append(frameData, gray)
-
-				if uint32(len(frameData)) >= header.DataSize {
-					frameData = frameData[:header.DataSize]
-					break
-				}
-			}
-			if uint32(len(frameData)) >= header.DataSize {
-				break
-			}
-		}
-	}
-
-	d.log("Read %d bytes of frame data", len(frameData))
-
-	actualCRC := crc32.ChecksumIEEE(frameData)
-	d.log("CRC check: expected=0x%08x, actual=0x%08x", header.CRC, actualCRC)
-
-	if !skipCRC && actualCRC != header.CRC {
-		return nil, nil, fmt.Errorf("%w: expected 0x%08x, got 0x%08x", format.ErrCRCFailed, header.CRC, actualCRC)
-	}
-
-	return frameData, header, nil
-}
-
-func (d *Decoder) readDenseData(img image.Image, startRow, rows, maxColsPerRow, dataColsPerRow, bigPixelsH, px, borderPx, maxBytes int) []byte {
-	return d.readDenseDataWithOffset(img, startRow, rows, maxColsPerRow, dataColsPerRow, bigPixelsH, px, borderPx, 0, 0, maxBytes)
-}
-
-func (d *Decoder) readDenseDataWithOffset(img image.Image, startRow, rows, maxColsPerRow, dataColsPerRow, bigPixelsH, px, borderPx, borderX, borderY, maxBytes int) []byte {
-	if dataColsPerRow <= 0 {
-		return nil
-	}
-
-	var result []byte
-	for row := startRow; row < startRow+rows && row < bigPixelsH-format.BorderBigPixels && len(result) < maxBytes; row++ {
-		colsThisRow := maxColsPerRow
-
-		bytesNeeded := maxBytes - len(result)
-		nibblesNeeded := bytesNeeded * 2
-		if nibblesNeeded < colsThisRow {
-			colsThisRow = nibblesNeeded
-		}
-
-		col := format.BorderBigPixels
-		for col < format.BorderBigPixels+colsThisRow && len(result) < maxBytes {
-			highGray := d.getBigPixelGrayWithBorder(img, col, row, px, borderPx, borderX, borderY)
-			highNibble := d.palette.Decode(highGray)
-
-			col++
-			if col < format.BorderBigPixels+colsThisRow && len(result) < maxBytes {
-				lowGray := d.getBigPixelGrayWithBorder(img, col, row, px, borderPx, borderX, borderY)
-				lowNibble := d.palette.Decode(lowGray)
-
-				result = append(result, (highNibble<<4)|lowNibble)
-			} else if len(result) < maxBytes {
-				result = append(result, highNibble<<4)
-			}
-			col++
-		}
-	}
-	return result
-}
-
-func (d *Decoder) readDenseDataWithBorder(img image.Image, startRow, rows, maxColsPerRow, dataColsPerRow, bigPixelsH, px, borderPx, borderX, borderY, maxBytes int) []byte {
-	return d.readDenseDataWithOffset(img, startRow, rows, maxColsPerRow, dataColsPerRow, bigPixelsH, px, borderPx, borderX, borderY, maxBytes)
+	return result[:metaInfo.FileSize], nil
 }
 
 func (d *Decoder) LoadImage(path string) (image.Image, error) {
@@ -505,155 +288,46 @@ func (d *Decoder) LoadImage(path string) (image.Image, error) {
 	return png.Decode(f)
 }
 
-func DecodeFrames(dir string, skipCRC ...bool) (map[uint32][]byte, error) {
-	return DecodeFramesWithLogger(dir, nil, skipCRC...)
-}
-
-func DecodeFramesWithLogger(dir string, logger func(string), skipCRC ...bool) (map[uint32][]byte, error) {
+func DecodeFile(inputPath string, logger func(string)) ([]byte, string, error) {
 	if logger == nil {
 		logger = func(string) {}
 	}
 
 	decoder := NewDecoderWithLogger(logger)
-	logger(fmt.Sprintf("Decoding frames from directory: %s", dir))
 
-	entries, err := os.ReadDir(dir)
+	img, err := decoder.LoadImage(inputPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read directory: %w", err)
+		return nil, "", fmt.Errorf("failed to load image: %w", err)
 	}
 
-	var frameFiles []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			ext := strings.ToLower(filepath.Ext(entry.Name()))
-			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
-				frameFiles = append(frameFiles, filepath.Join(dir, entry.Name()))
-			}
-		}
+	fi, err := decoder.DetectFrameInfo(img)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to detect frame info: %w", err)
 	}
 
-	logger(fmt.Sprintf("Found %d potential frame files", len(frameFiles)))
-	sort.Strings(frameFiles)
-
-	skip := len(skipCRC) > 0 && skipCRC[0]
-	logger(fmt.Sprintf("CRC validation: %v", !skip))
-
-	result := make(map[uint32][]byte)
-	successCount := 0
-	errorCount := 0
-
-	for i, path := range frameFiles {
-		logger(fmt.Sprintf("[%d/%d] Processing: %s", i+1, len(frameFiles), filepath.Base(path)))
-		img, err := decoder.LoadImage(path)
-		if err != nil {
-			logger(fmt.Sprintf("  ERROR: failed to load image: %v", err))
-			errorCount++
-			continue
-		}
-
-		data, header, err := decoder.DecodeFrameWithSkip(img, skip)
-		if err != nil {
-			logger(fmt.Sprintf("  ERROR: failed to decode frame: %v", err))
-			errorCount++
-			continue
-		}
-
-		logger(fmt.Sprintf("  SUCCESS: frame %d, %d bytes", header.FrameNum, len(data)))
-		result[header.FrameNum] = data
-		successCount++
+	data, metaInfo, err := decoder.DecodeImageWithMeta(img, fi)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to decode: %w", err)
 	}
 
-	logger(fmt.Sprintf("Decode complete: %d success, %d errors", successCount, errorCount))
-	return result, nil
+	filename := metaInfo.FileName
+	if filename == "" {
+		filename = filepath.Base(inputPath)
+		if ext := filepath.Ext(filename); ext != "" {
+			filename = filename[:len(ext)]
+		}
+		filename = filename + "_restored"
+	}
+
+	return data, filename, nil
 }
 
-func DecodeFramesFromPaths(paths []string, skipCRC ...bool) (map[uint32][]byte, error) {
-	return DecodeFramesFromPathsWithLogger(paths, nil, skipCRC...)
-}
-
-func DecodeFramesFromPathsWithLogger(paths []string, logger func(string), skipCRC ...bool) (map[uint32][]byte, error) {
-	if logger == nil {
-		logger = func(string) {}
-	}
-
-	decoder := NewDecoderWithLogger(logger)
-	logger(fmt.Sprintf("Decoding %d frames from paths", len(paths)))
-
-	sort.Strings(paths)
-	skip := len(skipCRC) > 0 && skipCRC[0]
-	result := make(map[uint32][]byte)
-	successCount := 0
-	errorCount := 0
-
-	for i, path := range paths {
-		logger(fmt.Sprintf("[%d/%d] Processing: %s", i+1, len(paths), filepath.Base(path)))
-		img, err := decoder.LoadImage(path)
-		if err != nil {
-			logger(fmt.Sprintf("  ERROR: failed to load: %v", err))
-			errorCount++
-			continue
-		}
-
-		data, header, err := decoder.DecodeFrameWithSkip(img, skip)
-		if err != nil {
-			logger(fmt.Sprintf("  ERROR: decode failed: %v", err))
-			errorCount++
-			continue
-		}
-
-		logger(fmt.Sprintf("  SUCCESS: frame %d, %d bytes", header.FrameNum, len(data)))
-		result[header.FrameNum] = data
-		successCount++
-	}
-
-	logger(fmt.Sprintf("Result: %d frames decoded successfully, %d errors", successCount, errorCount))
-	return result, nil
-}
-
-func ReconstructFile(frames map[uint32][]byte, outputPath string) error {
-	var frameNums []uint32
-	for num := range frames {
-		frameNums = append(frameNums, num)
-	}
-	sort.Slice(frameNums, func(i, j int) bool { return frameNums[i] < frameNums[j] })
-
+func SaveFile(data []byte, outputPath string) error {
 	f, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
+		return err
 	}
 	defer f.Close()
-
-	for _, num := range frameNums {
-		data := frames[num]
-		if _, err := f.Write(data); err != nil {
-			return fmt.Errorf("failed to write frame %d: %w", num, err)
-		}
-	}
-
-	return nil
-}
-
-func ExtractFilenameFromFrames(framePaths []string) string {
-	if len(framePaths) == 0 {
-		return ""
-	}
-	decoder := NewDecoder()
-	for _, path := range framePaths {
-		img, err := decoder.LoadImage(path)
-		if err != nil {
-			continue
-		}
-		headerData, _, err := decoder.readHeaderFromImage(img)
-		if err != nil || len(headerData) < format.HeaderSize {
-			continue
-		}
-		header, err := format.ParseHeader(headerData)
-		if err != nil {
-			continue
-		}
-		if header.FrameNum == 0 && header.GetFilename() != "" {
-			return header.GetFilename()
-		}
-	}
-	return ""
+	_, err = f.Write(data)
+	return err
 }

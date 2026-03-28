@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/jpeg"
 	"image/png"
 	"io"
 	"os"
@@ -14,25 +13,24 @@ import (
 )
 
 type Encoder struct {
-	width      int
-	height     int
-	pixelSize  format.PixelSize
-	mode       format.Mode
-	palette    format.DensePalette
-	logger     func(string)
+	width     int
+	height    int
+	pixelSize int
+	bitDepth  int
+	logger    func(string)
 }
 
 type EncoderOption func(*Encoder)
 
-func WithPixelSize(ps format.PixelSize) EncoderOption {
+func WithPixelSize(ps int) EncoderOption {
 	return func(e *Encoder) {
 		e.pixelSize = ps
 	}
 }
 
-func WithMode(m format.Mode) EncoderOption {
+func WithBitDepth(bd int) EncoderOption {
 	return func(e *Encoder) {
-		e.mode = m
+		e.bitDepth = bd
 	}
 }
 
@@ -52,9 +50,8 @@ func NewEncoder(width, height int, opts ...EncoderOption) *Encoder {
 	e := &Encoder{
 		width:     width,
 		height:    height,
-		pixelSize: format.Pixel2x2,
-		mode:      format.ModeRobustValue,
-		palette:   format.DefaultDensePalette,
+		pixelSize: 2,
+		bitDepth:  1,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -63,152 +60,153 @@ func NewEncoder(width, height int, opts ...EncoderOption) *Encoder {
 }
 
 func (e *Encoder) FrameInfo() format.FrameInfo {
-	return format.CalcFrameInfo(e.width, e.height, e.pixelSize, e.mode)
+	return format.CalcFrameInfo(e.width, e.height, e.pixelSize)
 }
 
-func (e *Encoder) EncodeChunk(data []byte, frameNum, totalFrames uint32, filename string) (*image.Gray, error) {
+func (e *Encoder) EncodeFile(data []byte, filename string) (*image.Gray, error) {
 	fi := e.FrameInfo()
-	e.log("EncodeChunk: width=%d, height=%d, pixelSize=%d, dataBigPixels=%d, dataLen=%d",
-		e.width, e.height, e.pixelSize, fi.DataBigPixels, len(data))
+	e.log("EncodeFile: width=%d, height=%d, pixelSize=%d, bitDepth=%d", e.width, e.height, e.pixelSize, e.bitDepth)
 
-	if fi.DataBigPixels <= 0 {
-		return nil, fmt.Errorf("%w: image too small for encoding (dataBigPixels=%d)", format.ErrImageTooSmall, fi.DataBigPixels)
+	if fi.DataCols < format.TemplateSize*2 || fi.DataRows < format.TemplateSize*2 {
+		return nil, fmt.Errorf("%w: image too small", format.ErrImageTooSmall)
 	}
 
-	dataLen := len(data)
-	if dataLen > fi.DataBigPixels {
-		e.log("WARNING: data (%d bytes) exceeds capacity (%d bytes), truncating", dataLen, fi.DataBigPixels)
-		dataLen = fi.DataBigPixels
+	metaInfo := &format.MetaInfo{
+		BitDepth: uint8(e.bitDepth),
+		FileSize: uint32(len(data)),
+		FileName: filename,
+		DataRows: uint16(fi.DataRows - format.TemplateSize*2),
+		DataCols: uint16(fi.DataCols),
 	}
+	metaInfo.SetCRC(data)
+	metaData := metaInfo.Serialize()
 
 	img := image.NewGray(image.Rect(0, 0, e.width, e.height))
 	e.drawBorder(img)
-	e.drawMetaHeader(img, data[:dataLen], frameNum, totalFrames, filename, uint32(len(data)))
-	e.drawData(img, data[:dataLen], frameNum, totalFrames)
+	e.drawTemplate(img, fi.StartMarker.X, fi.StartMarker.Y)
+	e.drawMetaData(img, metaData, fi)
+	e.drawData(img, data, metaInfo, fi)
+	e.drawTemplate(img, fi.EndMarker.X, fi.EndMarker.Y)
 
 	return img, nil
 }
 
 func (e *Encoder) drawBorder(img *image.Gray) {
 	bounds := img.Bounds()
-	px := int(e.pixelSize)
-	fi := e.FrameInfo()
+	borderPx := format.BorderWidth
 
 	for y := 0; y < bounds.Dy(); y++ {
 		for x := 0; x < bounds.Dx(); x++ {
-			bigY := y / px
-			bigX := x / px
-			isBorder := bigX < format.BorderBigPixels || bigX >= fi.BigPixelsW-format.BorderBigPixels ||
-				bigY < format.BorderBigPixels || bigY >= fi.BigPixelsH-format.BorderBigPixels
-
+			isBorder := x < borderPx || x >= bounds.Dx()-borderPx || y < borderPx || y >= bounds.Dy()-borderPx
 			if isBorder {
-				isWhite := (bigX+bigY)%2 == 0
-				c := uint8(0)
-				if isWhite {
-					c = format.CalibrationBits
-				}
-				img.SetGray(x, y, color.Gray{Y: c})
+				img.SetGray(x, y, color.Gray{Y: 255})
 			}
 		}
 	}
 }
 
-func (e *Encoder) drawMetaHeader(img *image.Gray, data []byte, frameNum, totalFrames uint32, filename string, fileSize uint32) {
-	fi := e.FrameInfo()
-	px := int(e.pixelSize)
+func (e *Encoder) drawTemplate(img *image.Gray, startX, startY int) {
+	px := e.pixelSize
 
-	header := format.NewHeader(fileSize, frameNum, totalFrames, uint32(len(data)))
-	header.SetCRC(data)
-	if frameNum == 0 {
-		header.SetFilename(filename)
+	for row := 0; row < format.TemplateSize; row++ {
+		for col := 0; col < format.TemplateSize; col++ {
+			isWhite := (row+col)%2 == 0
+			gray := uint8(0)
+			if isWhite {
+				gray = 255
+			}
+			e.fillPixel(img, startX+col*px, startY+row*px, int(gray))
+		}
 	}
-	headerData := header.Serialize()
+}
 
-	if e.mode == format.ModeDenseValue {
-		e.drawDenseData(img, headerData, format.BorderBigPixels, fi.BigPixelsW, fi.BigPixelsH, px)
-	} else {
-		dataOffset := 0
-		for row := format.BorderBigPixels; row < format.BorderBigPixels*2 && row < fi.BigPixelsH; row++ {
-			for col := format.BorderBigPixels; col < fi.BigPixelsW-format.BorderBigPixels && dataOffset < len(headerData); col++ {
-				gray := headerData[dataOffset]
-				e.fillBigPixel(img, col, row, gray, px)
-				dataOffset++
+func (e *Encoder) drawMetaData(img *image.Gray, metaData []byte, fi format.FrameInfo) {
+	px := e.pixelSize
+	startX := fi.StartMarker.X + format.TemplateSize*px
+	startY := fi.StartMarker.Y + format.TemplateSize*px
+
+	bitIndex := 0
+	bytesNeeded := (format.MetaFixedBits + 7) / 8
+	if bytesNeeded > len(metaData) {
+		bytesNeeded = len(metaData)
+	}
+
+	row := 0
+	col := 0
+
+	for byteIdx := 0; byteIdx < bytesNeeded; byteIdx++ {
+		for bit := 7; bit >= 0; bit-- {
+			if bitIndex >= format.MetaFixedBits {
+				break
+			}
+
+			bitValue := (metaData[byteIdx] >> bit) & 1
+			gray := uint8(0)
+			if bitValue == 1 {
+				gray = 255
+			}
+
+			px := e.pixelSize
+			e.fillPixel(img, startX+col*px, startY+row*px, int(gray))
+
+			col++
+			if col >= fi.DataCols {
+				col = 0
+				row++
+			}
+			bitIndex++
+		}
+	}
+}
+
+func (e *Encoder) drawData(img *image.Gray, data []byte, metaInfo *format.MetaInfo, fi format.FrameInfo) {
+	px := e.pixelSize
+	dataCols := int(metaInfo.DataCols)
+	dataRows := int(metaInfo.DataRows)
+
+	startX := fi.StartMarker.X + format.TemplateSize*px
+	startY := fi.StartMarker.Y + format.TemplateSize*px + (format.MetaFixedBits+dataCols-1)/dataCols*px
+
+	bitsPerPoint := e.bitDepth
+	maxValue := (1 << bitsPerPoint) - 1
+
+	bitBuffer := make([]bool, 0)
+	for _, b := range data {
+		for i := 7; i >= 0; i-- {
+			bitBuffer = append(bitBuffer, (b>>i)&1 == 1)
+		}
+	}
+
+	row := 0
+	col := 0
+
+	for bitIdx := 0; bitIdx < len(bitBuffer); bitIdx += bitsPerPoint {
+		var value uint8
+		for b := 0; b < bitsPerPoint && bitIdx+b < len(bitBuffer); b++ {
+			if bitBuffer[bitIdx+b] {
+				value |= uint8(1 << b)
+			}
+		}
+
+		gray := uint8(float64(value) / float64(maxValue) * 255)
+		e.fillPixel(img, startX+col*px, startY+row*px, int(gray))
+
+		col++
+		if col >= dataCols {
+			col = 0
+			row++
+			if row >= dataRows {
+				break
 			}
 		}
 	}
 }
 
-func (e *Encoder) drawData(img *image.Gray, data []byte, frameNum, totalFrames uint32) {
-	fi := e.FrameInfo()
-	px := int(e.pixelSize)
-
-	metaRows := format.BorderBigPixels
-	if e.mode == format.ModeDenseValue {
-		metaRows = (format.HeaderSize * 2) / (fi.BigPixelsW - 2*format.BorderBigPixels)
-		if (format.HeaderSize*2)%(fi.BigPixelsW-2*format.BorderBigPixels) != 0 {
-			metaRows++
-		}
-	}
-
-	if e.mode == format.ModeDenseValue {
-		e.drawDenseData(img, data, metaRows, fi.BigPixelsW, fi.BigPixelsH, px)
-	} else {
-		metaEndRow := format.BorderBigPixels * 2
-		dataCols := fi.BigPixelsW - 2*format.BorderBigPixels
-		rowsNeeded := (len(data) + dataCols - 1) / dataCols
-		dataEndRow := metaEndRow + rowsNeeded
-		if dataEndRow > fi.BigPixelsH-format.BorderBigPixels {
-			dataEndRow = fi.BigPixelsH - format.BorderBigPixels
-		}
-		dataOffset := 0
-		for row := metaEndRow; row < dataEndRow && dataOffset < len(data); row++ {
-			for col := format.BorderBigPixels; col < fi.BigPixelsW-format.BorderBigPixels && dataOffset < len(data); col++ {
-				gray := data[dataOffset]
-				e.fillBigPixel(img, col, row, gray, px)
-				dataOffset++
-			}
-		}
-	}
-}
-
-func (e *Encoder) drawDenseData(img *image.Gray, data []byte, startRow, bigPixelsW, bigPixelsH, px int) (rowsUsed int) {
-	colsPerRow := bigPixelsW - 2*format.BorderBigPixels
-	if colsPerRow <= 0 {
-		return 0
-	}
-
-	dataOffset := 0
-	for row := startRow; row < bigPixelsH-format.BorderBigPixels && dataOffset < len(data); row++ {
-		rowsUsed++
-		for col := format.BorderBigPixels; col < bigPixelsW-format.BorderBigPixels && dataOffset < len(data); col++ {
-			byteVal := data[dataOffset]
-			highNibble := (byteVal >> 4) & 0x0F
-			lowNibble := byteVal & 0x0F
-
-			e.fillBigPixel(img, col, row, e.palette[highNibble], px)
-			dataOffset++
-
-			if dataOffset < len(data) && col+1 < bigPixelsW-format.BorderBigPixels {
-				byteVal = data[dataOffset]
-				highNibble = (byteVal >> 4) & 0x0F
-				lowNibble = byteVal & 0x0F
-				e.fillBigPixel(img, col+1, row, e.palette[lowNibble], px)
-				dataOffset++
-			}
-		}
-	}
-	return rowsUsed
-}
-
-func (e *Encoder) fillBigPixel(img *image.Gray, bigX, bigY int, gray uint8, size int) {
-	fi := e.FrameInfo()
-	borderPx := fi.BorderW
-	startX := borderPx + bigX*size
-	startY := borderPx + bigY*size
-
-	for dy := 0; dy < size && startY+dy < e.height; dy++ {
-		for dx := 0; dx < size && startX+dx < e.width; dx++ {
-			img.SetGray(startX+dx, startY+dy, color.Gray{Y: gray})
+func (e *Encoder) fillPixel(img *image.Gray, x, y, gray int) {
+	px := e.pixelSize
+	for dy := 0; dy < px && y+dy < e.height; dy++ {
+		for dx := 0; dx < px && x+dx < e.width; dx++ {
+			img.SetGray(x+dx, y+dy, color.Gray{Y: uint8(gray)})
 		}
 	}
 }
@@ -222,110 +220,58 @@ func (e *Encoder) SaveImage(img *image.Gray, path string) error {
 	return png.Encode(f, img)
 }
 
-func (e *Encoder) SaveImageJPEG(img *image.Gray, path string, quality int) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	rgba := image.NewRGBA(img.Bounds())
-	for y := 0; y < img.Bounds().Dy(); y++ {
-		for x := 0; x < img.Bounds().Dx(); x++ {
-			gray := img.GrayAt(x, y).Y
-			rgba.Set(x, y, color.Gray{Y: gray})
-		}
-	}
-
-	// Use standard library's jpeg encoder
-	return jpeg.Encode(f, rgba, &jpeg.Options{Quality: quality})
-}
-
-type EncodeLogger func(string)
-
-func EncodeFile(inputPath, outputDir string, width, height int, pixelSize format.PixelSize, mode format.Mode, format_ string, logger EncodeLogger) (int, error) {
+func EncodeFile(inputPath, outputPath string, width, height, pixelSize, bitDepth int, logger func(string)) error {
 	if logger == nil {
 		logger = func(string) {}
 	}
 
-	logger(fmt.Sprintf("Starting encode: input=%s, output=%s, width=%d, height=%d, pixelSize=%d, mode=%d, format=%s",
-		inputPath, outputDir, width, height, pixelSize, mode, format_))
+	logger(fmt.Sprintf("Encoding: input=%s, output=%s, size=%dx%d, pixelSize=%d, bitDepth=%d",
+		inputPath, outputPath, width, height, pixelSize, bitDepth))
 
 	file, err := os.Open(inputPath)
 	if err != nil {
-		return 0, fmt.Errorf("failed to open input file: %w", err)
+		return fmt.Errorf("failed to open input file: %w", err)
 	}
 	defer file.Close()
 
-	info, err := file.Stat()
+	data, err := io.ReadAll(file)
 	if err != nil {
-		return 0, fmt.Errorf("failed to stat input file: %w", err)
-	}
-	totalSize := uint32(info.Size())
-	logger(fmt.Sprintf("File size: %d bytes", totalSize))
-
-	encoder := NewEncoder(width, height, WithPixelSize(pixelSize), WithMode(mode))
-	fi := encoder.FrameInfo()
-	logger(fmt.Sprintf("FrameInfo: bigPixelsW=%d, bigPixelsH=%d, dataBigPixels=%d, borderW=%d",
-		fi.BigPixelsW, fi.BigPixelsH, fi.DataBigPixels, fi.BorderW))
-
-	if fi.DataBigPixels <= 0 {
-		return 0, fmt.Errorf("%w: calculated dataBigPixels=%d is too small", format.ErrImageTooSmall, fi.DataBigPixels)
+		return fmt.Errorf("failed to read input file: %w", err)
 	}
 
-	dataPerFrame := uint32(fi.DataBigPixels)
-	if mode == format.ModeDenseValue {
-		dataPerFrame = uint32(fi.DataBigPixels) / 2
-	}
-	logger(fmt.Sprintf("Data per frame: %d bytes", dataPerFrame))
+	logger(fmt.Sprintf("File size: %d bytes", len(data)))
 
-	totalFrames := (totalSize + dataPerFrame - 1) / dataPerFrame
-	if totalFrames == 0 {
-		totalFrames = 1
+	encoder := NewEncoder(width, height, WithPixelSize(pixelSize), WithBitDepth(bitDepth), WithLogger(logger))
+	img, err := encoder.EncodeFile(data, filepath.Base(inputPath))
+	if err != nil {
+		return fmt.Errorf("failed to encode: %w", err)
 	}
-	logger(fmt.Sprintf("Total frames needed: %d", totalFrames))
+
+	if err := encoder.SaveImage(img, outputPath); err != nil {
+		return fmt.Errorf("failed to save image: %w", err)
+	}
+
+	logger(fmt.Sprintf("Encoded successfully: %s", outputPath))
+	return nil
+}
+
+func EncodeFileToDir(inputPath, outputDir string, width, height, pixelSize, bitDepth int, logger func(string)) error {
+	if logger == nil {
+		logger = func(string) {}
+	}
 
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return 0, fmt.Errorf("failed to create output directory: %w", err)
+		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	buf := make([]byte, dataPerFrame)
-	frameNum := uint32(0)
-
-	for {
-		n, err := file.Read(buf)
-		if n == 0 && err == io.EOF {
-			break
-		}
-		if err != nil && err != io.EOF {
-			return int(frameNum), fmt.Errorf("failed to read file: %w", err)
-		}
-
-		chunk := buf[:n]
-		logger(fmt.Sprintf("Encoding frame %d/%d with %d bytes", frameNum+1, totalFrames, n))
-
-		img, err := encoder.EncodeChunk(chunk, frameNum, totalFrames, filepath.Base(inputPath))
-		if err != nil {
-			return int(frameNum), fmt.Errorf("failed to encode chunk: %w", err)
-		}
-
-		frameFilename := fmt.Sprintf("frame_%04d.%s", frameNum, format_)
-		framePath := filepath.Join(outputDir, frameFilename)
-
-		if format_ == "png" {
-			if err := encoder.SaveImage(img, framePath); err != nil {
-				return int(frameNum) + 1, fmt.Errorf("failed to save PNG: %w", err)
-			}
-		} else {
-			if err := encoder.SaveImageJPEG(img, framePath, 95); err != nil {
-				return int(frameNum) + 1, fmt.Errorf("failed to save JPEG: %w", err)
-			}
-		}
-
-		logger(fmt.Sprintf("Saved frame %d to %s", frameNum, frameFilename))
-		frameNum++
+	filename := filepath.Base(inputPath)
+	if ext := filepath.Ext(filename); ext != "" {
+		filename = filename[:len(ext)] + ".png"
+	} else {
+		filename = filename + ".png"
 	}
 
-	logger(fmt.Sprintf("Encoding complete: %d frames saved to %s", frameNum, outputDir))
-	return int(frameNum), nil
+	outputPath := filepath.Join(outputDir, filename)
+
+	return EncodeFile(inputPath, outputPath, width, height, pixelSize, bitDepth, logger)
 }

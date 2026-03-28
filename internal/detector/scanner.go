@@ -52,9 +52,14 @@ func (s *Scanner) extractUniqueFrames(paths []string) ([]string, error) {
 	hashes := make(map[string]string)
 	unique := make(map[string]bool)
 
-	for _, path := range paths {
+	fmt.Printf("[SCANNER] Processing %d frames for uniqueness...\n", len(paths))
+	for i, path := range paths {
+		if i > 0 && i%5 == 0 {
+			fmt.Printf("[SCANNER] Processed %d/%d frames...\n", i, len(paths))
+		}
 		img, err := s.loadImage(path)
 		if err != nil {
+			fmt.Printf("[SCANNER] Warning: failed to load %s: %v\n", path, err)
 			continue
 		}
 
@@ -65,6 +70,9 @@ func (s *Scanner) extractUniqueFrames(paths []string) ([]string, error) {
 		hashes[hash] = path
 		unique[path] = true
 	}
+
+	fmt.Printf("[SCANNER] Found %d unique frames\n", len(unique))
+	os.Stdout.Sync()
 
 	var result []string
 	for _, path := range paths {
