@@ -159,7 +159,7 @@ func interactiveMode() {
 			continue
 		}
 		ext := strings.ToLower(filepath.Ext(entry.Name()))
-		if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
+		if ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" {
 			framePaths = append(framePaths, filepath.Join(input, entry.Name()))
 		}
 	}
@@ -268,7 +268,7 @@ func main() {
 				continue
 			}
 			ext := strings.ToLower(filepath.Ext(entry.Name()))
-			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
+			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" {
 				framePaths = append(framePaths, filepath.Join(*input, entry.Name()))
 			}
 		}
